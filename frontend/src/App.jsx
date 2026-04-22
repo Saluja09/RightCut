@@ -8,6 +8,7 @@ import PreviewPanel from './components/PreviewPanel'
 import StatusBar from './components/StatusBar'
 import LoginPage from './components/LoginPage'
 import LeftSidebar from './components/LeftSidebar'
+import RoleSelectModal from './components/RoleSelectModal'
 import useWorkspaceStore from './stores/workspaceStore'
 import useAuthStore from './stores/authStore'
 import useThemeStore from './stores/themeStore'
@@ -21,8 +22,10 @@ if (!store.sessionId) {
 }
 
 export default function App() {
-  const sessionId  = useWorkspaceStore((s) => s.sessionId)
-  const messages   = useWorkspaceStore((s) => s.messages)
+  const sessionId   = useWorkspaceStore((s) => s.sessionId)
+  const messages    = useWorkspaceStore((s) => s.messages)
+  const sessionRole = useWorkspaceStore((s) => s.sessionRole)
+  const setSessionRole = useWorkspaceStore((s) => s.setSessionRole)
   const { user, isGuest, loading: authLoading, initAuth } = useAuthStore()
   const { initTheme } = useThemeStore()
   const { upsertSession, saveMessage, loadSessions, saveWorkbook, loadWorkbook } = useHistoryStore()
@@ -35,6 +38,14 @@ export default function App() {
     initAuth()
     initTheme()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // If messages load into a session that has no role set, default to finance
+  // (covers restored sessions where the modal would incorrectly appear)
+  useEffect(() => {
+    if (sessionRole === null && messages.length > 0) {
+      setSessionRole('finance')
+    }
+  }, [messages.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist session to history whenever messages change
   useEffect(() => {
@@ -95,6 +106,8 @@ export default function App() {
       }
     }
     const activeSheet = wb?.active_sheet || wb?.sheets?.[0]?.name || null
+
+    // Switch frontend state first so the UI updates immediately
     useWorkspaceStore.setState({
       sessionId: newSessionId,
       messages: msgs,
@@ -102,11 +115,44 @@ export default function App() {
       tabs,
       activeTab: activeSheet,
       activeSheet,
+      // Mark that this session needs backend restoration (WS onopen will pick this up)
+      pendingRestore: wb ? { workbook_state: wb, messages: msgs } : null,
+      // Existing sessions skip the role modal — treat as finance (default)
+      sessionRole: msgs.length > 0 ? 'finance' : null,
     })
+
+    // Also eagerly call restore so backend is ready before the next user message
+    if (wb) {
+      try {
+        await fetch(`/restore/${newSessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workbook_state: wb,
+            messages: msgs.map((m) => ({ role: m.role, text: m.text, timestamp: m.timestamp })),
+          }),
+        })
+      } catch (e) {
+        // Non-fatal: WS session_ready handler will retry if needed
+        console.warn('Eager restore failed, will retry on WS connect:', e)
+      }
+    }
+  }
+
+  const showRoleModal = sessionRole === null && sessionId
+
+  const handleRoleConfirm = (role) => {
+    setSessionRole(role)
   }
 
   return (
     <div className="app-root">
+      {showRoleModal && (
+        <RoleSelectModal
+          sessionId={sessionId}
+          onConfirm={handleRoleConfirm}
+        />
+      )}
       <LeftSidebar onSelectSession={handleSelectSession} />
       <div className="app-right">
         <div className="app-main">

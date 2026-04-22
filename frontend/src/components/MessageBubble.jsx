@@ -2,7 +2,7 @@
  * RightCut — Message bubble.
  * User-facing checklist timeline, live step updates, markdown rendering.
  */
-import { Bot, User, AlertCircle, Sheet, FileSpreadsheet, ArrowRight } from 'lucide-react'
+import { Bot, User, AlertCircle, LayoutGrid, FileSpreadsheet, ArrowRight } from 'lucide-react'
 import ToolTimeline from './ToolTimeline'
 import useWorkspaceStore from '../stores/workspaceStore'
 
@@ -19,7 +19,7 @@ export default function MessageBubble({ message }) {
   if (isLive) {
     return (
       <div className="message message--agent">
-        <div className="message-avatar agent-avatar"><Bot size={13} /></div>
+        <div className="agent-avatar"><Bot size={13} /></div>
         <div className="message-body">
           {steps.length === 0 ? (
             <div className="thinking-indicator">
@@ -28,11 +28,18 @@ export default function MessageBubble({ message }) {
               <span className="thinking-dot" />
             </div>
           ) : (
-            <div className="tl-card">
-              <ToolTimeline steps={steps} isLive />
-            </div>
+            <ToolTimeline steps={steps} isLive />
           )}
         </div>
+      </div>
+    )
+  }
+
+  /* ── System (compaction notice, etc.) ── */
+  if (role === 'system') {
+    return (
+      <div className="message message--system">
+        <div className="message-system-text">{text}</div>
       </div>
     )
   }
@@ -41,7 +48,7 @@ export default function MessageBubble({ message }) {
   if (role === 'error') {
     return (
       <div className="message message--error">
-        <div className="message-avatar error-avatar"><AlertCircle size={13} /></div>
+        <div className="error-avatar"><AlertCircle size={13} /></div>
         <div className="message-body">
           <div className="message-text error-text">{text}</div>
           <div className="message-time">{formatTime(timestamp)}</div>
@@ -72,7 +79,7 @@ export default function MessageBubble({ message }) {
           )}
           <div className="message-time">{formatTime(timestamp)}</div>
         </div>
-        <div className="message-avatar user-avatar-msg"><User size={12} /></div>
+        <div className="user-avatar-msg"><User size={12} /></div>
       </div>
     )
   }
@@ -80,14 +87,10 @@ export default function MessageBubble({ message }) {
   /* ── Agent ── */
   return (
     <div className="message message--agent">
-      <div className="message-avatar agent-avatar"><Bot size={13} /></div>
+      <div className="agent-avatar"><Bot size={13} /></div>
       <div className="message-body">
-        {/* Tool call checklist — shown above the text response */}
-        {steps.length > 0 && (
-          <div className="tl-card">
-            <ToolTimeline steps={steps} isLive={false} />
-          </div>
-        )}
+        {/* Tool call timeline — shown above the text response */}
+        {steps.length > 0 && <ToolTimeline steps={steps} isLive={false} />}
         <div className="message-text agent-text">
           <MarkdownText text={text} />
         </div>
@@ -113,7 +116,7 @@ export default function MessageBubble({ message }) {
                     className="sheet-ref-pill"
                     onClick={() => setActiveTab(ref.name)}
                   >
-                    <Sheet size={11} />
+                    <LayoutGrid size={11} />
                     {ref.name}
                   </button>
                 ))}

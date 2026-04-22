@@ -17,11 +17,12 @@ from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google.genai import types
+from pydantic import BaseModel
 
 from agent.orchestrator import AgentOrchestrator
-from agent.prompts import CELL_EDIT_CONTEXT_TEMPLATE, DOCUMENT_UPLOAD_CONTEXT_TEMPLATE
+from agent.prompts import CELL_EDIT_CONTEXT_TEMPLATE, DOCUMENT_UPLOAD_CONTEXT_TEMPLATE, get_system_prompt
 from agent.tools import ToolExecutor
-from config import CORS_ORIGINS, GEMINI_API_KEY, SESSION_TTL_HOURS, UPLOAD_MAX_SIZE_MB
+from config import CORS_ORIGINS, GEMINI_API_KEY, GEMINI_MODEL, SESSION_TTL_HOURS, UPLOAD_MAX_SIZE_MB
 from excel.engine import WorkbookEngine
 from models import ParsedDocument
 
@@ -59,6 +60,7 @@ class WorkspaceSession:
     cell_edit_buffer: list[dict] = field(default_factory=list)
     created_at: datetime.datetime = field(default_factory=datetime.datetime.utcnow)
     last_active: datetime.datetime = field(default_factory=datetime.datetime.utcnow)
+    session_role: str = "finance"   # "finance" | "general"
 
 
 sessions: dict[str, WorkspaceSession] = {}
@@ -96,6 +98,128 @@ async def startup() -> None:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "sessions": len(sessions)}
+
+
+# ── Session restore ───────────────────────────────────────────────────────────
+
+class RestoreMessageItem(BaseModel):
+    role: str
+    text: str | None = None
+    timestamp: int | None = None
+
+
+class RestoreRequest(BaseModel):
+    workbook_state: dict | None = None   # WorkbookState JSON from frontend
+    messages: list[RestoreMessageItem] = []
+
+
+@app.post("/restore/{session_id}")
+async def restore_session(session_id: str, body: RestoreRequest) -> dict:
+    """
+    Restore a backend session from a workbook snapshot + message history.
+    Called by the frontend when switching to a previously saved session.
+    Rebuilds the WorkbookEngine from the serialised WorkbookState so the
+    agent operates on the correct workbook when the user sends the next message.
+    """
+    session = get_or_create_session(session_id)
+
+    # ── 1. Rebuild WorkbookEngine from snapshot ────────────────────────────
+    sheets_restored = 0
+    if body.workbook_state:
+        engine = WorkbookEngine()
+        wb_sheets = body.workbook_state.get("sheets") or []
+
+        for sheet_data in wb_sheets:
+            sheet_name = sheet_data.get("name", "Sheet")
+            headers = sheet_data.get("headers") or []
+            rows_data = sheet_data.get("rows") or []
+
+            # Create sheet with headers
+            engine.create_sheet(sheet_name, headers)
+
+            # Collect plain-value rows and formula cells separately
+            plain_rows: list[list[str]] = []
+            formula_cells: list[tuple[int, int, str]] = []  # (row_idx, col_idx, formula)
+
+            for row_idx, row in enumerate(rows_data):
+                plain_row: list[str] = []
+                for col_idx, cell in enumerate(row):
+                    if not cell:
+                        plain_row.append("")
+                        continue
+                    formula = cell.get("formula")
+                    if formula:
+                        # Placeholder so insert_data keeps row count correct
+                        plain_row.append("")
+                        formula_cells.append((row_idx + 2, col_idx + 1, formula))  # +2: 1-indexed, skip header
+                    else:
+                        val = cell.get("value")
+                        plain_row.append("" if val is None else str(val))
+                plain_rows.append(plain_row)
+
+            # Insert non-formula cell values
+            if plain_rows:
+                engine.insert_data(sheet_name, plain_rows, start_row=2)
+
+            # Write formulas directly via openpyxl (bypasses insert_data string coercion)
+            if formula_cells and sheet_name in engine.wb.sheetnames:
+                ws = engine.wb[sheet_name]
+                for r, c, formula in formula_cells:
+                    ws.cell(row=r, column=c).value = formula
+
+            sheets_restored += 1
+
+        session.engine = engine
+        logger.info(
+            f"Restore session {session_id}: rebuilt {sheets_restored} sheet(s)"
+        )
+
+    # ── 2. Rebuild conversation_history from saved messages ────────────────
+    if body.messages:
+        history: list[types.Content] = []
+        for msg in body.messages:
+            role = msg.role
+            text = (msg.text or "").strip()
+            if not text:
+                continue
+            # Map frontend roles to Gemini roles
+            if role == "user":
+                history.append(
+                    types.Content(role="user", parts=[types.Part.from_text(text=text)])
+                )
+            elif role in ("agent", "assistant"):
+                history.append(
+                    types.Content(role="model", parts=[types.Part.from_text(text=text)])
+                )
+            # Skip system/error/agent_pending messages — not relevant to Gemini context
+        session.conversation_history = history
+        logger.info(
+            f"Restore session {session_id}: rebuilt {len(history)} conversation turns"
+        )
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "sheets_restored": sheets_restored,
+        "history_turns": len(session.conversation_history),
+    }
+
+
+# ── Session configuration ─────────────────────────────────────────────────────
+
+class ConfigureRequest(BaseModel):
+    role: str = "finance"   # "finance" | "general"
+
+
+@app.post("/configure/{session_id}")
+async def configure_session(session_id: str, body: ConfigureRequest) -> dict:
+    """Set session-level configuration such as the agent role/persona."""
+    valid_roles = {"finance", "general"}
+    role = body.role if body.role in valid_roles else "finance"
+    session = get_or_create_session(session_id)
+    session.session_role = role
+    logger.info(f"Session {session_id}: role set to '{role}'")
+    return {"ok": True, "session_id": session_id, "role": role}
 
 
 # ── File upload ───────────────────────────────────────────────────────────────
@@ -154,6 +278,114 @@ async def upload_file(session_id: str, file: UploadFile = File(...)) -> dict:
     }
 
 
+# ── Chat summary download ─────────────────────────────────────────────────────
+
+@app.get("/summary/{session_id}")
+async def download_summary(session_id: str, format: str = "md") -> StreamingResponse:
+    """
+    Generate and download a structured summary of the session's conversation.
+    Includes key decisions, assumptions, figures, and model outputs.
+    format: 'md' (default) or 'txt'
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    history = session.conversation_history
+    if not history:
+        raise HTTPException(status_code=404, detail="No conversation history yet")
+
+    # Build transcript for Gemini to summarise
+    lines: list[str] = []
+    for turn in history:
+        role = (turn.role or "unknown").upper()
+        text_parts = [
+            p.text for p in (turn.parts or [])
+            if hasattr(p, "text") and p.text and not p.text.startswith("[CONTEXT:")
+        ]
+        if text_parts:
+            lines.append(f"{role}: {''.join(text_parts)[:800]}")
+
+    transcript = "\n\n".join(lines)
+
+    # Also include current workbook structure for context
+    sheet_names = session.engine.get_all_sheet_names()
+    workbook_ctx = f"Sheets in workbook: {', '.join(sheet_names)}" if sheet_names else "No workbook built."
+
+    prompt = f"""You are preparing a professional session summary for a financial analyst.
+
+Based on the conversation below, produce a structured Markdown document with these sections:
+
+# Session Summary
+
+## Overview
+One paragraph describing what was accomplished in this session.
+
+## Model Built
+What type of model was built (DCF, LBO, comps, etc.), for which company, and the key structure.
+
+## Key Assumptions
+A table or bullet list of all numerical assumptions used (WACC, growth rates, margins, multiples, etc.) with their values.
+
+## Key Outputs & Figures
+The critical outputs — intrinsic value per share, enterprise value, EBITDA, IRR, MOIC, etc. — in a table or bullet list.
+
+## Decisions & Changes
+Any notable decisions made during the session — model structure choices, assumption revisions, data sources used.
+
+## Uploaded Documents
+List any documents the user uploaded and how they were used.
+
+## Caveats & Assumptions to Review
+Any assumptions that were defaulted or that the analyst should validate.
+
+---
+{workbook_ctx}
+
+CONVERSATION TRANSCRIPT:
+{transcript}
+
+Write only the Markdown document. Be factual and concise. Use real numbers from the conversation."""
+
+    try:
+        from google import genai as _genai
+        from google.genai import types as _types
+        client = _genai.Client(api_key=GEMINI_API_KEY)
+        resp = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[_types.Content(role="user", parts=[_types.Part.from_text(text=prompt)])],
+            config=_types.GenerateContentConfig(temperature=0.1, max_output_tokens=2048),
+        )
+        cands = resp.candidates or []
+        cparts = (cands[0].content.parts if cands and cands[0].content else None) or []
+        md_content = (cparts[0].text or "").strip() if cparts else ""
+        if not md_content:
+            raise ValueError("Model returned an empty summary")
+    except Exception as e:
+        logger.exception(f"Summary generation failed for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate summary: {e}")
+
+    if format == "txt":
+        # Strip markdown syntax for plain text
+        import re
+        txt = re.sub(r"#{1,6}\s*", "", md_content)
+        txt = re.sub(r"\*\*(.+?)\*\*", r"\1", txt)
+        txt = re.sub(r"\*(.+?)\*", r"\1", txt)
+        content_bytes = txt.encode("utf-8")
+        media_type = "text/plain"
+        filename = "rightcut_summary.txt"
+    else:
+        content_bytes = md_content.encode("utf-8")
+        media_type = "text/markdown"
+        filename = "rightcut_summary.md"
+
+    return StreamingResponse(
+        io.BytesIO(content_bytes),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ── Workbook download ─────────────────────────────────────────────────────────
 
 @app.get("/download/{session_id}")
@@ -187,8 +419,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
     session = get_or_create_session(session_id)
     logger.info(f"WebSocket connected: session={session_id}")
 
+    has_workbook = bool(session.engine.get_all_sheet_names())
+
+    # Tell the frontend whether the backend session already has a workbook.
+    # If not, the frontend will call POST /restore/{session_id} to rebuild it.
+    await websocket.send_json({
+        "type": "session_ready",
+        "session_id": session_id,
+        "has_workbook": has_workbook,
+    })
+
     # Send initial workbook state if sheets exist
-    if session.engine.get_all_sheet_names():
+    if has_workbook:
         from excel.serializer import serialize_workbook
         wb_state = serialize_workbook(session.engine.wb, session.engine._charts)
         await websocket.send_json({"type": "workbook_update", "state": wb_state})
@@ -237,6 +479,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
                         executor=executor,
                         workbook=session.engine,
                         websocket=websocket,
+                        system_prompt=get_system_prompt(session.session_role),
                     )
                 except Exception as e:
                     logger.exception(f"Agent error in session {session_id}: {e}")

@@ -27,6 +27,27 @@ export function useWebSocket() {
     function dispatch(msg) {
       const s = useWorkspaceStore.getState()
       switch (msg.type) {
+        case 'session_ready': {
+          // If the backend session is empty but we have a saved snapshot, restore it
+          if (!msg.has_workbook && s.pendingRestore) {
+            const { sessionId: sid, pendingRestore } = s
+            fetch(`/restore/${sid}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                workbook_state: pendingRestore.workbook_state,
+                messages: (pendingRestore.messages || []).map((m) => ({
+                  role: m.role,
+                  text: m.text,
+                  timestamp: m.timestamp,
+                })),
+              }),
+            }).catch((e) => console.warn('WS-triggered restore failed:', e))
+          }
+          // Clear the pending restore flag regardless
+          useWorkspaceStore.setState({ pendingRestore: null })
+          break
+        }
         case 'tool_call':
           if (s.pendingMessageId) s.addToolStep(s.pendingMessageId, msg.step)
           break
@@ -56,6 +77,24 @@ export function useWebSocket() {
           s.setWsStatus('connected')
           s.setPendingMessageId(null)
           break
+        case 'history_compacted': {
+          const strategyLabels = {
+            tool_result: 'Tool results compressed',
+            summarization: 'Older turns summarized',
+            sliding_window: 'History trimmed',
+          }
+          const label = strategyLabels[msg.strategy] || 'History compacted'
+          const saving = msg.tokens_before && msg.tokens_after
+            ? ` · ${Math.round((1 - msg.tokens_after / msg.tokens_before) * 100)}% token saving`
+            : ''
+          s.addMessage({
+            id: crypto.randomUUID(),
+            role: 'system',
+            text: `${label}${saving}`,
+            timestamp: Date.now(),
+          })
+          break
+        }
         case 'pong':
           break
         default:
@@ -78,6 +117,7 @@ export function useWebSocket() {
       ws.onopen = () => {
         attempts.current = 0
         useWorkspaceStore.getState().setWsStatus('connected')
+        // session_ready message from backend will trigger restore if needed
       }
 
       ws.onmessage = (e) => {

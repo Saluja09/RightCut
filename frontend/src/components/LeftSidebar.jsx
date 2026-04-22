@@ -47,6 +47,7 @@ export default function LeftSidebar({ onSelectSession }) {
       tabs: [],
       activeTab: null,
       activeSheet: null,
+      sessionRole: null,   // triggers role-select modal
     })
   }
 

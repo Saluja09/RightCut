@@ -25,6 +25,18 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      '/summary': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/restore': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/configure': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
   build: {

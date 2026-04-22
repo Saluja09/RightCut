@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Send, Paperclip,
   FileText, FileSpreadsheet, FileBarChart2, AtSign,
-  Building2, TrendingUp, Calculator
+  Building2, TrendingUp, Calculator, Download
 } from 'lucide-react'
 import MessageBubble from './MessageBubble'
 import useWorkspaceStore from '../stores/workspaceStore'
@@ -38,6 +38,27 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
 
   const isThinking = wsStatus === 'thinking'
   const canSend    = inputText.trim().length > 0 && !isThinking && wsStatus === 'connected'
+
+  const handleDownloadSummary = async (format = 'md') => {
+    if (!sessionId) return
+    try {
+      const res = await fetch(`/summary/${sessionId}?format=${format}`)
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        alert(err.detail || 'Failed to generate summary.')
+        return
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `rightcut_summary.${format}`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      alert('Failed to generate summary.')
+    }
+  }
 
   // Filter docs for @ mention
   const docList = Object.values(documents)
@@ -317,7 +338,28 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
         />
         <div className="input-hint">
           <span className="input-hint-text">@ to mention · ↑↓ history</span>
-          <span className="input-hint-kbd">↵ Send</span>
+          <div className="input-hint-right">
+            {messages.length > 1 && (
+              <div className="summary-dropdown">
+                <button
+                  className="input-hint-summary"
+                  onClick={() => handleDownloadSummary('md')}
+                  title="Download session summary"
+                >
+                  <Download size={11} />
+                  Summary
+                </button>
+                <button
+                  className="input-hint-summary input-hint-summary--txt"
+                  onClick={() => handleDownloadSummary('txt')}
+                  title="Download as .txt"
+                >
+                  .txt
+                </button>
+              </div>
+            )}
+            <span className="input-hint-kbd">↵ Send</span>
+          </div>
         </div>
       </div>
     </div>

@@ -41,3 +41,16 @@ CORS_ORIGINS: list[str] = [
 
 # ── Session ───────────────────────────────────────────────────────────────────
 SESSION_TTL_HOURS: int = int(os.getenv("SESSION_TTL_HOURS", "4"))
+
+# ── History compaction pipeline ───────────────────────────────────────────────
+# Estimated token budget before compaction fires.
+# Gemini 2.5 Flash supports 1M tokens but we compact early to save cost.
+# Tool result collapse (Strategy 1) always runs regardless of this budget.
+COMPACT_TOKEN_BUDGET: int = int(os.getenv("COMPACT_TOKEN_BUDGET", "60000"))
+# Keep this many recent tool-call groups verbatim when collapsing old ones (Strategy 1)
+COMPACT_TOOL_KEEP_LAST: int = int(os.getenv("COMPACT_TOOL_KEEP_LAST", "2"))
+# Keep this many recent text groups verbatim during LLM summarization (Strategy 2)
+COMPACT_SUMMARY_KEEP_LAST: int = int(os.getenv("COMPACT_SUMMARY_KEEP_LAST", "8"))
+# Sliding window backstop — set very high to avoid dropping critical context (Strategy 3)
+# Effectively disabled for normal sessions; only fires on extremely long conversations
+COMPACT_WINDOW_KEEP_LAST: int = int(os.getenv("COMPACT_WINDOW_KEEP_LAST", "40"))

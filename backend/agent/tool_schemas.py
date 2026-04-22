@@ -254,24 +254,30 @@ CREATE_MODEL_SCAFFOLD = types.FunctionDeclaration(
     description=(
         "Build a complete, professionally formatted financial model scaffold in one call. "
         "Use this INSTEAD of manually calling create_sheet + insert_data + add_formula for standard models. "
-        "Produces correctly cross-referenced formulas, proper section headers, color-coded rows, "
-        "and a final_answer_row — no circular references guaranteed. "
-        "Supported model_type: 'dcf'"
+        "Produces correctly cross-referenced formulas, proper section headers, color-coded rows — "
+        "no circular references guaranteed. "
+        "Supported model_type: 'dcf' or 'lbo'. "
+        "For LBO: builds Cover, Assumptions, Debt Schedule, Income Statement, and Returns sheets "
+        "with MOIC and IRR automatically calculated."
     ),
     parameters=_obj(
         "create_model_scaffold parameters",
         props={
             "model_type": types.Schema(
                 type=types.Type.STRING,
-                description="Type of model to build",
-                enum=["dcf"],
+                description="Type of model to build: 'dcf' or 'lbo'",
+                enum=["dcf", "lbo"],
             ),
             "params": _obj(
-                "Model parameters. For DCF: base_ebitda (number), revenue_growth (e.g. 0.10), "
-                "ebitda_margin (e.g. 0.20), da_pct (e.g. 0.05), capex_pct (e.g. 0.06), "
-                "wc_pct (e.g. 0.01), tax_rate (e.g. 0.25), wacc (e.g. 0.10), "
-                "terminal_growth (e.g. 0.03), net_debt (number), shares_outstanding (number), "
-                "company_name (string), years (integer, default 5), currency (string, default USD)",
+                "Model parameters. "
+                "For DCF: base_ebitda, revenue_growth (e.g. 0.10), ebitda_margin (e.g. 0.20), "
+                "da_pct (e.g. 0.05), capex_pct (e.g. 0.06), wc_pct (e.g. 0.01), "
+                "tax_rate (e.g. 0.25), wacc (e.g. 0.10), terminal_growth (e.g. 0.03), "
+                "net_debt, shares_outstanding, company_name, years (default 5), currency (default USD). "
+                "For LBO: entry_ebitda, entry_multiple (e.g. 8.0), revenue_growth (e.g. 0.10), "
+                "ebitda_margin (e.g. 0.25), debt_pct (e.g. 0.60), interest_rate (e.g. 0.07), "
+                "amort_pct (e.g. 0.05), exit_multiple (e.g. 10.0), tax_rate (e.g. 0.25), "
+                "company_name, years (default 5), currency (default USD).",
             ),
         },
         required=["model_type"],

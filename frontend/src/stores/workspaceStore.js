@@ -13,7 +13,17 @@ function loadPersistedState() {
     if (!raw) return {}
     const { workbookState, tabs, activeTab, activeSheet } = JSON.parse(raw)
     // Don't restore messages — avoids duplicate key issues and stale pending states
-    return { workbookState: workbookState || null, tabs: tabs || [], activeTab: activeTab || null, activeSheet: activeSheet || null }
+    const wb = workbookState || null
+    return {
+      workbookState: wb,
+      tabs: tabs || [],
+      activeTab: activeTab || null,
+      activeSheet: activeSheet || null,
+      // If we have a saved workbook, mark it for backend restore on next WS connect
+      pendingRestore: wb ? { workbook_state: wb, messages: [] } : null,
+      // Existing sessions (have workbook) skip the role modal; fresh sessions show it
+      sessionRole: wb ? 'finance' : null,
+    }
   } catch (_) {
     return {}
   }
@@ -113,6 +123,15 @@ const useWorkspaceStore = create((set, get) => ({
   stagePendingFile: (fileId) =>
     set((s) => ({ pendingFileIds: [...s.pendingFileIds, fileId] })),
   clearPendingFiles: () => set({ pendingFileIds: [] }),
+
+  // ── Session restore ───────────────────────────────────────────────────────
+  // Set when switching to a saved session; cleared by WS session_ready handler
+  pendingRestore: null,
+
+  // ── Session role ──────────────────────────────────────────────────────────
+  // 'finance' | 'general' — set by RoleSelectModal at session start
+  sessionRole: null,
+  setSessionRole: (role) => set({ sessionRole: role }),
 
   // ── WebSocket / agent status ───────────────────────────────────────────────
   // 'disconnected' | 'connecting' | 'connected' | 'thinking'

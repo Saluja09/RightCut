@@ -92,7 +92,7 @@ class WorkbookEngine:
         """
         Build a complete, correctly-structured model scaffold with proper
         formulas, references, and formatting in one call.
-        Supported model_type: "dcf"
+        Supported model_type: "dcf" or "lbo"
         params for DCF:
           base_ebitda, revenue_growth, ebitda_margin, da_pct, capex_pct,
           wc_pct, tax_rate, wacc, terminal_growth, net_debt, shares_outstanding,
@@ -100,6 +100,8 @@ class WorkbookEngine:
         """
         if model_type.lower() == "dcf":
             return self._build_dcf_scaffold(params)
+        if model_type.lower() == "lbo":
+            return self._build_lbo_scaffold(params)
         return {"error": f"Unknown model_type: {model_type}", "success": False}
 
     def _build_dcf_scaffold(self, p: dict) -> dict:
@@ -504,6 +506,434 @@ class WorkbookEngine:
                 "shares": 16, "intrinsic_value_per_share": 17,
             },
             "note": "All formulas are circular-reference-free. Assumptions sheet drives IS and DCF. Edit Assumptions!B3-B17 to update model.",
+        }
+
+    def _build_lbo_scaffold(self, p: dict) -> dict:
+        """
+        Build a complete LBO model with:
+          Sheet 1 — Cover
+          Sheet 2 — Assumptions  (entry, financing, operating, exit)
+          Sheet 3 — Debt Schedule (term loan amortisation + PIK)
+          Sheet 4 — Income Statement & Cash Flow
+          Sheet 5 — Returns (MOIC, IRR, equity bridge)
+
+        params:
+          company_name, entry_ebitda, entry_multiple, revenue_growth,
+          ebitda_margin, debt_pct, interest_rate, amort_pct,
+          exit_multiple, tax_rate, years (default 5), currency (default USD)
+        """
+        from datetime import date
+
+        company      = p.get("company_name", "Portfolio Co")
+        currency     = p.get("currency", "USD")
+        entry_ebitda = float(p.get("entry_ebitda", 50_000_000))
+        entry_mult   = float(p.get("entry_multiple", 8.0))
+        rev_growth   = float(p.get("revenue_growth", 0.10))
+        ebitda_mgn   = float(p.get("ebitda_margin", 0.25))
+        debt_pct     = float(p.get("debt_pct", 0.60))        # % of TEV financed by debt
+        int_rate     = float(p.get("interest_rate", 0.07))
+        amort_pct    = float(p.get("amort_pct", 0.05))       # % of initial debt/yr
+        exit_mult    = float(p.get("exit_multiple", 10.0))
+        tax_rate     = float(p.get("tax_rate", 0.25))
+        n_years      = int(p.get("years", 5))
+        today        = date.today().strftime("%Y-%m-%d")
+        base_year    = date.today().year
+        year_labels  = [f"FY{base_year + i}E" for i in range(1, n_years + 1)]
+
+        # Derived entry values
+        tev          = entry_ebitda * entry_mult
+        entry_debt   = tev * debt_pct
+        entry_equity = tev * (1 - debt_pct)
+        entry_rev    = entry_ebitda / ebitda_mgn
+
+        # Clear any previous sheets with the same names
+        for sn in ["Cover", "Assumptions", "Debt Schedule", "Income Statement", "Returns"]:
+            if sn in self.wb.sheetnames:
+                del self.wb[sn]
+            self._charts[sn] = []
+
+        _SEC  = "D9E2F3"
+        _DARK = "1F3864"
+        _GREEN_FILL = PatternFill(fill_type="solid", fgColor="E2EFDA")
+        _BOLD_GREEN = Font(bold=True, color="375623", size=11)
+        _NAVY_FILL  = PatternFill(fill_type="solid", fgColor="1F3864")
+        _WHITE_BOLD = Font(bold=True, color="FFFFFF", size=12)
+
+        def _hdr(ws, col, val):
+            c = ws.cell(row=1, column=col, value=val)
+            c.font = Font(bold=True, color="FFFFFF", size=11)
+            c.fill = PatternFill(fill_type="solid", fgColor="1F4E79")
+            c.alignment = Alignment(horizontal="center")
+            c.border = _BORDER
+
+        def _sec(ws, row, label, n_cols=2):
+            for c in range(1, n_cols + 1):
+                cell = ws.cell(row=row, column=c, value=label if c == 1 else None)
+                cell.font = Font(bold=True, color=_DARK, size=11)
+                cell.fill = PatternFill(fill_type="solid", fgColor=_SEC)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                cell.border = _BORDER
+
+        def _val(ws, row, col, value, fmt=None, bold=False):
+            c = ws.cell(row=row, column=col, value=value)
+            c.border = _BORDER
+            if fmt:
+                c.number_format = fmt
+            if bold:
+                c.font = Font(bold=True, size=11)
+            return c
+
+        # ════════════════════════════════════════════════════════════
+        # SHEET 1 — Cover
+        # ════════════════════════════════════════════════════════════
+        ws_cov = self.wb.create_sheet("Cover")
+        ws_cov.column_dimensions["A"].width = 30
+        ws_cov.column_dimensions["B"].width = 36
+        for c, h in enumerate(["Label", "Value"], 1):
+            _hdr(ws_cov, c, h)
+        cover_rows = [
+            ("Model Title",       f"LBO Analysis — {company}"),
+            ("Model Date",        today),
+            ("Currency",          currency),
+            ("Projection Period", f"{n_years} Years"),
+            ("Valuation Method",  "Leveraged Buyout — Cash-on-Cash / IRR"),
+            ("Analyst",           "RightCut AI"),
+        ]
+        for r, (lbl, val) in enumerate(cover_rows, 2):
+            ws_cov.cell(row=r, column=1, value=lbl).border = _BORDER
+            ws_cov.cell(row=r, column=2, value=val).border = _BORDER
+        for c in (1, 2):
+            cell = ws_cov.cell(row=2, column=c)
+            cell.font = Font(bold=True, color="FFFFFF", size=12)
+            cell.fill = PatternFill(fill_type="solid", fgColor="1F3864")
+
+        # ════════════════════════════════════════════════════════════
+        # SHEET 2 — Assumptions
+        # Row map:
+        #  1=header
+        #  2=ENTRY section,  3=Entry EBITDA, 4=Entry Multiple, 5=TEV, 6=Debt%, 7=Entry Debt, 8=Entry Equity
+        #  9=OPERATING,      10=Rev Growth, 11=EBITDA Margin, 12=Tax Rate
+        #  13=FINANCING,     14=Interest Rate, 15=Amort%
+        #  16=EXIT,          17=Exit Multiple, 18=Exit Year
+        # ════════════════════════════════════════════════════════════
+        ws_ass = self.wb.create_sheet("Assumptions")
+        ws_ass.column_dimensions["A"].width = 32
+        ws_ass.column_dimensions["B"].width = 18
+        for c, h in enumerate(["Assumption", "Value"], 1):
+            _hdr(ws_ass, c, h)
+
+        A = {
+            "entry_ebitda":  "Assumptions!$B$3",
+            "entry_mult":    "Assumptions!$B$4",
+            "tev":           "Assumptions!$B$5",
+            "debt_pct":      "Assumptions!$B$6",
+            "entry_debt":    "Assumptions!$B$7",
+            "entry_equity":  "Assumptions!$B$8",
+            "rev_growth":    "Assumptions!$B$10",
+            "ebitda_mgn":    "Assumptions!$B$11",
+            "tax_rate":      "Assumptions!$B$12",
+            "int_rate":      "Assumptions!$B$14",
+            "amort_pct":     "Assumptions!$B$15",
+            "exit_mult":     "Assumptions!$B$17",
+            "exit_year":     "Assumptions!$B$18",
+        }
+
+        ass_data = [
+            (2,  "ENTRY ASSUMPTIONS",         None,         True,  None),
+            (3,  "Entry EBITDA",               entry_ebitda, False, "#,##0"),
+            (4,  "Entry EV / EBITDA Multiple", entry_mult,   False, "0.0x"),
+            (5,  "Total Enterprise Value",     tev,          False, "#,##0"),
+            (6,  "Debt Financing (%)",         debt_pct,     False, "0.0%"),
+            (7,  "Entry Debt",                 entry_debt,   False, "#,##0"),
+            (8,  "Sponsor Equity",             entry_equity, False, "#,##0"),
+            (9,  "OPERATING ASSUMPTIONS",      None,         True,  None),
+            (10, "Revenue Growth Rate",        rev_growth,   False, "0.0%"),
+            (11, "EBITDA Margin",              ebitda_mgn,   False, "0.0%"),
+            (12, "Corporate Tax Rate",         tax_rate,     False, "0.0%"),
+            (13, "FINANCING ASSUMPTIONS",      None,         True,  None),
+            (14, "Interest Rate on Debt",      int_rate,     False, "0.0%"),
+            (15, "Annual Amortisation (%)",    amort_pct,    False, "0.0%"),
+            (16, "EXIT ASSUMPTIONS",           None,         True,  None),
+            (17, "Exit EV / EBITDA Multiple",  exit_mult,    False, "0.0x"),
+            (18, "Hold Period (Years)",        n_years,      False, "0"),
+        ]
+        for row, lbl, val, is_sec, fmt in ass_data:
+            ca = ws_ass.cell(row=row, column=1, value=lbl)
+            cb = ws_ass.cell(row=row, column=2, value=val)
+            ca.border = _BORDER; cb.border = _BORDER
+            if is_sec:
+                for c in (ca, cb):
+                    c.font = Font(bold=True, color=_DARK, size=11)
+                    c.fill = PatternFill(fill_type="solid", fgColor=_SEC)
+            elif fmt:
+                cb.number_format = fmt
+
+        # ════════════════════════════════════════════════════════════
+        # SHEET 3 — Debt Schedule
+        # Col A = label, B..F = years
+        # Rows: 1=hdr, 2=Opening Balance, 3=Amortisation, 4=Closing Balance,
+        #       5=blank, 6=Interest Expense, 7=Cash Interest Paid
+        # ════════════════════════════════════════════════════════════
+        ws_dbt = self.wb.create_sheet("Debt Schedule")
+        ws_dbt.column_dimensions["A"].width = 28
+        for i in range(1, n_years + 1):
+            ws_dbt.column_dimensions[get_column_letter(i + 1)].width = 14
+
+        ds_hdrs = ["Line Item"] + year_labels
+        for c, h in enumerate(ds_hdrs, 1):
+            _hdr(ws_dbt, c, h)
+
+        yr_cols = [get_column_letter(i + 2) for i in range(n_years)]  # C,D,E,F,G shifted to B,C,...
+
+        # Simpler: col B=yr1, C=yr2 ...
+        ds_cols = [get_column_letter(i + 2) for i in range(n_years)]  # B,C,D,E,F
+
+        # Row 2: Opening Debt Balance
+        ws_dbt.cell(row=2, column=1, value="Opening Debt Balance").border = _BORDER
+        for i, col in enumerate(ds_cols):
+            if i == 0:
+                formula = f"={A['entry_debt']}"
+            else:
+                prev = ds_cols[i - 1]
+                formula = f"={prev}4"   # prior closing balance
+            _val(ws_dbt, 2, ord(col) - ord("A") + 1, formula, "#,##0")
+
+        # Row 3: Amortisation (-)
+        ws_dbt.cell(row=3, column=1, value="Mandatory Amortisation").border = _BORDER
+        for i, col in enumerate(ds_cols):
+            formula = f"=-{A['entry_debt']}*{A['amort_pct']}"
+            _val(ws_dbt, 3, ord(col) - ord("A") + 1, formula, "#,##0")
+
+        # Row 4: Closing Balance
+        ws_dbt.cell(row=4, column=1, value="Closing Debt Balance").border = _BORDER
+        for i, col in enumerate(ds_cols):
+            formula = f"={col}2+{col}3"
+            c = _val(ws_dbt, 4, ord(col) - ord("A") + 1, formula, "#,##0", bold=True)
+            c.fill = _GREEN_FILL; c.font = _BOLD_GREEN
+
+        # Row 5 blank
+        ws_dbt.cell(row=5, column=1, value="").border = _BORDER
+
+        # Row 6: Interest Expense (on avg balance)
+        ws_dbt.cell(row=6, column=1, value="Interest Expense").border = _BORDER
+        for i, col in enumerate(ds_cols):
+            formula = f"=-({col}2+{col}4)/2*{A['int_rate']}"
+            _val(ws_dbt, 6, ord(col) - ord("A") + 1, formula, "#,##0")
+
+        ws_dbt.freeze_panes = "B2"
+
+        # ════════════════════════════════════════════════════════════
+        # SHEET 4 — Income Statement & Cash Flow
+        # Col A=label, B..F=years
+        # Rows: 1=hdr, 2=Revenue, 3=EBITDA, 4=D&A(est), 5=EBIT,
+        #       6=Interest, 7=EBT, 8=Tax, 9=Net Income,
+        #       10=blank, 11=EBITDA(again), 12=Capex(est), 13=D&A,
+        #       14=Change WC, 15=Interest Paid, 16=Tax Paid, 17=FCF to Equity
+        # ════════════════════════════════════════════════════════════
+        ws_is = self.wb.create_sheet("Income Statement")
+        ws_is.column_dimensions["A"].width = 30
+        for i in range(1, n_years + 1):
+            ws_is.column_dimensions[get_column_letter(i + 1)].width = 14
+
+        is_hdrs = ["Line Item"] + year_labels
+        for c, h in enumerate(is_hdrs, 1):
+            _hdr(ws_is, c, h)
+
+        is_cols = [get_column_letter(i + 2) for i in range(n_years)]
+
+        # Row 2: Revenue  (base = entry_ebitda / ebitda_margin, grow each year)
+        ws_is.cell(row=2, column=1, value="Revenue").border = _BORDER
+        for i, col in enumerate(is_cols):
+            if i == 0:
+                base_rev_formula = f"={A['entry_ebitda']}/{A['ebitda_mgn']}*(1+{A['rev_growth']})"
+            else:
+                prev = is_cols[i - 1]
+                base_rev_formula = f"={prev}2*(1+{A['rev_growth']})"
+            _val(ws_is, 2, ord(col) - ord("A") + 1, base_rev_formula, "#,##0")
+
+        # Row 3: EBITDA
+        ws_is.cell(row=3, column=1, value="EBITDA").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 3, ord(col) - ord("A") + 1, f"={col}2*{A['ebitda_mgn']}", "#,##0")
+        for c in range(1, n_years + 2):
+            ws_is.cell(row=3, column=c).fill = _GREEN_FILL
+            ws_is.cell(row=3, column=c).font = _BOLD_GREEN
+
+        # Row 4: D&A (estimated at 3% of revenue)
+        ws_is.cell(row=4, column=1, value="D&A (est. 3% rev)").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 4, ord(col) - ord("A") + 1, f"=-{col}2*0.03", "#,##0")
+
+        # Row 5: EBIT
+        ws_is.cell(row=5, column=1, value="EBIT").border = _BORDER
+        for col in is_cols:
+            c = _val(ws_is, 5, ord(col) - ord("A") + 1, f"={col}3+{col}4", "#,##0", bold=True)
+
+        # Row 6: Interest (from Debt Schedule row 6)
+        ws_is.cell(row=6, column=1, value="Interest Expense").border = _BORDER
+        for i, col in enumerate(is_cols):
+            ds_col = ds_cols[i]
+            _val(ws_is, 6, ord(col) - ord("A") + 1, f"='Debt Schedule'!{ds_col}6", "#,##0")
+
+        # Row 7: EBT
+        ws_is.cell(row=7, column=1, value="EBT (Pre-Tax Income)").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 7, ord(col) - ord("A") + 1, f"={col}5+{col}6", "#,##0")
+
+        # Row 8: Tax
+        ws_is.cell(row=8, column=1, value="Income Tax").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 8, ord(col) - ord("A") + 1, f"=IF({col}7>0,-{col}7*{A['tax_rate']},0)", "#,##0")
+
+        # Row 9: Net Income
+        ws_is.cell(row=9, column=1, value="Net Income").border = _BORDER
+        for col in is_cols:
+            c = _val(ws_is, 9, ord(col) - ord("A") + 1, f"={col}7+{col}8", "#,##0", bold=True)
+            c.fill = _GREEN_FILL; c.font = _BOLD_GREEN
+
+        # Row 10: blank
+        ws_is.cell(row=10, column=1, value="").border = _BORDER
+
+        # Section: Free Cash Flow
+        _sec(ws_is, 11, "FREE CASH FLOW TO EQUITY", n_years + 1)
+        # Row 11 section header already set — put EBITDA ref in same row cols
+        for i, col in enumerate(is_cols):
+            ws_is.cell(row=11, column=ord(col) - ord("A") + 1, value=None).border = _BORDER
+
+        # Row 12: Capex (est -4% rev)
+        ws_is.cell(row=12, column=1, value="Capital Expenditure (est)").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 12, ord(col) - ord("A") + 1, f"=-{col}2*0.04", "#,##0")
+
+        # Row 13: D&A add-back
+        ws_is.cell(row=13, column=1, value="D&A Add-back").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 13, ord(col) - ord("A") + 1, f"=-{col}4", "#,##0")
+
+        # Row 14: Change in Working Capital (est -1% rev growth)
+        ws_is.cell(row=14, column=1, value="Change in Working Capital").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 14, ord(col) - ord("A") + 1, f"=-{col}2*0.01", "#,##0")
+
+        # Row 15: Interest paid (from debt schedule)
+        ws_is.cell(row=15, column=1, value="Cash Interest Paid").border = _BORDER
+        for i, col in enumerate(is_cols):
+            ds_col = ds_cols[i]
+            _val(ws_is, 15, ord(col) - ord("A") + 1, f"='Debt Schedule'!{ds_col}6", "#,##0")
+
+        # Row 16: Tax paid
+        ws_is.cell(row=16, column=1, value="Tax Paid").border = _BORDER
+        for col in is_cols:
+            _val(ws_is, 16, ord(col) - ord("A") + 1, f"={col}8", "#,##0")
+
+        # Row 17: FCF to Equity
+        ws_is.cell(row=17, column=1, value="Free Cash Flow to Equity").border = _BORDER
+        for col in is_cols:
+            c = _val(ws_is, 17, ord(col) - ord("A") + 1,
+                     f"={col}9+{col}12+{col}13+{col}14", "#,##0", bold=True)
+            c.fill = _GREEN_FILL; c.font = _BOLD_GREEN
+
+        ws_is.freeze_panes = "B2"
+
+        # ════════════════════════════════════════════════════════════
+        # SHEET 5 — Returns  (MOIC & IRR)
+        # Col A=label, B=value
+        # Rows:
+        #  1=hdr
+        #  2=EXIT section, 3=Exit Year EBITDA, 4=Exit Multiple, 5=Exit TEV,
+        #  6=Closing Debt at Exit, 7=Exit Equity Value
+        #  8=blank
+        #  9=RETURNS section, 10=Entry Equity, 11=Exit Equity, 12=MOIC,
+        #  13=IRR (using XIRR approx), 14=Hold Period
+        #  15=blank
+        #  16=CASH FLOW BRIDGE section
+        #  17..21=yearly FCF (for IRR)
+        # ════════════════════════════════════════════════════════════
+        ws_ret = self.wb.create_sheet("Returns")
+        ws_ret.column_dimensions["A"].width = 32
+        ws_ret.column_dimensions["B"].width = 20
+        for c, h in enumerate(["Metric", "Value"], 1):
+            _hdr(ws_ret, c, h)
+
+        last_is_col = is_cols[-1]     # last projected year column in IS
+        last_ds_col = ds_cols[-1]     # last year column in Debt Schedule
+
+        _sec(ws_ret, 2, "EXIT VALUATION")
+        _val(ws_ret, 3, 1, "Exit Year EBITDA").border = _BORDER
+        _val(ws_ret, 3, 2, f"='Income Statement'!{last_is_col}3", "#,##0")
+        _val(ws_ret, 4, 1, "Exit EV/EBITDA Multiple").border = _BORDER
+        _val(ws_ret, 4, 2, f"={A['exit_mult']}", "0.0x")
+        _val(ws_ret, 5, 1, "Exit Enterprise Value").border = _BORDER
+        _val(ws_ret, 5, 2, "=B3*B4", "#,##0")
+        _val(ws_ret, 6, 1, "Closing Debt at Exit").border = _BORDER
+        _val(ws_ret, 6, 2, f"='Debt Schedule'!{last_ds_col}4", "#,##0")
+        _val(ws_ret, 7, 1, "Exit Equity Value").border = _BORDER
+        c7 = _val(ws_ret, 7, 2, "=B5-B6", "#,##0", bold=True)
+        c7.fill = _GREEN_FILL; c7.font = _BOLD_GREEN
+
+        ws_ret.cell(row=8, column=1).border = _BORDER
+        ws_ret.cell(row=8, column=2).border = _BORDER
+
+        _sec(ws_ret, 9, "RETURNS SUMMARY")
+        _val(ws_ret, 10, 1, "Entry Equity (Invested)").border = _BORDER
+        _val(ws_ret, 10, 2, f"={A['entry_equity']}", "#,##0")
+        _val(ws_ret, 11, 1, "Exit Equity (Proceeds)").border = _BORDER
+        _val(ws_ret, 11, 2, "=B7", "#,##0")
+
+        # MOIC = Exit Equity / Entry Equity
+        _val(ws_ret, 12, 1, "MOIC (Money-on-Money)").border = _BORDER
+        c_moic = _val(ws_ret, 12, 2, "=B11/B10", "0.00x", bold=True)
+        c_moic.fill = _NAVY_FILL; c_moic.font = _WHITE_BOLD
+
+        # IRR approximation: =(MOIC^(1/hold_period))-1
+        _val(ws_ret, 13, 1, "IRR (Approx. CAGR Method)").border = _BORDER
+        c_irr = _val(ws_ret, 13, 2, f"=(B11/B10)^(1/{A['exit_year']})-1", "0.0%", bold=True)
+        c_irr.fill = _NAVY_FILL; c_irr.font = _WHITE_BOLD
+
+        _val(ws_ret, 14, 1, "Hold Period (Years)").border = _BORDER
+        _val(ws_ret, 14, 2, f"={A['exit_year']}", "0")
+
+        ws_ret.cell(row=15, column=1).border = _BORDER
+        ws_ret.cell(row=15, column=2).border = _BORDER
+
+        # Cash flow bridge — initial equity outflow + yearly FCF
+        _sec(ws_ret, 16, "CASH FLOW BRIDGE (for IRR)")
+        _val(ws_ret, 17, 1, "Year 0 — Entry (Equity Outflow)").border = _BORDER
+        _val(ws_ret, 17, 2, f"=-{A['entry_equity']}", "#,##0")
+        for i, (col, lbl) in enumerate(zip(is_cols, year_labels)):
+            row = 18 + i
+            _val(ws_ret, row, 1, f"{lbl} — FCF to Equity").border = _BORDER
+            _val(ws_ret, row, 2, f"='Income Statement'!{col}17", "#,##0")
+        # Final year: also add exit equity proceeds
+        last_row = 18 + n_years - 1
+        ws_ret.cell(row=last_row, column=2).value = (
+            f"='Income Statement'!{last_is_col}17+Returns!B7"
+        )
+
+        ws_ret.freeze_panes = "B2"
+
+        sheets_created = ["Cover", "Assumptions", "Debt Schedule", "Income Statement", "Returns"]
+        for sn in sheets_created:
+            self._charts.setdefault(sn, [])
+
+        return {
+            "sheets_created": sheets_created,
+            "assumption_rows": {
+                "entry_ebitda": 3, "entry_multiple": 4, "tev": 5,
+                "debt_pct": 6, "entry_debt": 7, "entry_equity": 8,
+                "rev_growth": 10, "ebitda_margin": 11, "tax_rate": 12,
+                "interest_rate": 14, "amort_pct": 15,
+                "exit_multiple": 17, "hold_years": 18,
+            },
+            "returns_rows": {
+                "exit_ebitda": 3, "exit_tev": 5, "closing_debt": 6,
+                "exit_equity": 7, "entry_equity": 10, "moic": 12, "irr": 13,
+            },
+            "note": (
+                "LBO scaffold complete. MOIC and IRR are in the Returns sheet. "
+                "Edit Assumptions!B3:B18 to sensitise the model. "
+                "IRR uses CAGR approximation — for precision use Excel XIRR on the Cash Flow Bridge rows."
+            ),
         }
 
     # ── Data insertion ────────────────────────────────────────────────────────
@@ -969,6 +1399,11 @@ class WorkbookEngine:
     # ── Download ──────────────────────────────────────────────────────────────
 
     def to_bytes(self) -> bytes:
+        # Force Excel to recalculate all formulas on open.
+        # openpyxl does not evaluate formulas, so cached values are absent.
+        # Setting fullCalcOnLoad ensures Excel doesn't show stale zeros.
+        self.wb.calculation.calcMode = "auto"
+        self.wb.calculation.fullCalcOnLoad = True
         buf = io.BytesIO()
         self.wb.save(buf)
         buf.seek(0)
