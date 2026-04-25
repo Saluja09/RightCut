@@ -115,11 +115,26 @@ export default function App() {
     const cur = useWorkspaceStore.getState()
     if (cur.sessionId && cur.workbookState) {
       try {
-        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify(cur.workbookState))
+        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify({ ...cur.workbookState, _sessionId: cur.sessionId }))
       } catch (_) {}
     }
 
+    // ── CRITICAL: switch sessionId + clear workbook BEFORE any async work ──
+    // This ensures the WS dispatch guard (`s.sessionId !== sessionId`) rejects
+    // stale workbook_update messages from the old session's WebSocket while we
+    // await loadMessages / loadWorkbook below.
     localStorage.setItem('rightcut_session_id', newSessionId)
+    useWorkspaceStore.setState({
+      sessionId: newSessionId,
+      workbookState: null,
+      tabs: [],
+      activeTab: null,
+      activeSheet: null,
+      pendingRestore: null,
+      restoring: false,
+      pendingMessageId: null,
+    })
+
     const { loadMessages, loadWorkbook } = useHistoryStore.getState()
     const [msgs, wb] = await Promise.all([
       loadMessages(newSessionId, user?.id),
@@ -133,9 +148,8 @@ export default function App() {
     }
     const activeSheet = wb?.active_sheet || wb?.sheets?.[0]?.name || null
 
-    // Switch frontend state first so the UI updates immediately
+    // Apply loaded data — sessionId is already set above
     useWorkspaceStore.setState({
-      sessionId: newSessionId,
       messages: msgs,
       workbookState: wb || null,
       tabs,
@@ -143,11 +157,13 @@ export default function App() {
       activeSheet,
       // Mark that this session needs backend restoration (WS onopen will pick this up)
       pendingRestore: wb ? { workbook_state: wb, messages: msgs } : null,
+      // Block message sends until restore is done
+      restoring: !!wb,
       // Existing sessions skip the role modal — default to general
       sessionRole: msgs.length > 0 ? 'general' : null,
     })
 
-    // Also eagerly call restore so backend is ready before the next user message
+    // Eagerly call restore so backend is ready before the next user message
     if (wb) {
       try {
         await fetch(apiUrl(`/restore/${newSessionId}`), {
@@ -160,8 +176,9 @@ export default function App() {
           }),
         })
       } catch (e) {
-        // Non-fatal: WS session_ready handler will retry if needed
         console.warn('Eager restore failed, will retry on WS connect:', e)
+      } finally {
+        useWorkspaceStore.setState({ restoring: false })
       }
     }
   }

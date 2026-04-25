@@ -6,19 +6,43 @@ import { create } from 'zustand'
 
 // Keys to persist across reloads
 const PERSIST_KEY = 'rightcut_store'
+const MIGRATION_KEY = 'rightcut_migration_v1'
+
+// One-time migration: clear potentially contaminated per-session workbook keys
+// from before the cross-session contamination fix.
+if (!localStorage.getItem(MIGRATION_KEY)) {
+  const keysToRemove = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key?.startsWith('rightcut_wb_')) keysToRemove.push(key)
+  }
+  keysToRemove.forEach((k) => localStorage.removeItem(k))
+  // Also clear the global persisted state to remove stale workbooks
+  localStorage.removeItem(PERSIST_KEY)
+  localStorage.setItem(MIGRATION_KEY, '1')
+}
 
 function loadPersistedState() {
   try {
     const raw = localStorage.getItem(PERSIST_KEY)
     if (!raw) return {}
-    const { workbookState, tabs, activeTab, activeSheet, sessionRole } = JSON.parse(raw)
-    const wb = workbookState || null
+    const parsed = JSON.parse(raw)
+    const { workbookState, tabs, activeTab, activeSheet, sessionRole } = parsed
+
+    // Only restore workbook if it belongs to the current session
+    // (prevents cross-session contamination after session switches)
+    const currentSessionId = localStorage.getItem('rightcut_session_id')
+    const storedSessionId = parsed.sessionId
+    // If the persisted state includes a sessionId, it must match the current one.
+    // If it doesn't include one (old format), discard the workbook — we can't verify ownership.
+    const sessionMatch = storedSessionId ? storedSessionId === currentSessionId : false
+    const wb = (workbookState && sessionMatch) ? workbookState : null
     const role = sessionRole || (wb ? 'general' : null)
 
-    // If workbook exists but tabs are missing/empty, rebuild from sheets
-    let resolvedTabs = tabs || []
-    let resolvedActiveTab = activeTab || null
-    let resolvedActiveSheet = activeSheet || null
+    // If workbook was discarded, also discard tabs/activeSheet to avoid stale UI
+    let resolvedTabs = wb ? (tabs || []) : []
+    let resolvedActiveTab = wb ? (activeTab || null) : null
+    let resolvedActiveSheet = wb ? (activeSheet || null) : null
     if (wb && resolvedTabs.length === 0 && wb.sheets?.length > 0) {
       resolvedTabs = wb.sheets.map((s) => ({ id: s.name, name: s.name, type: 'sheet' }))
       resolvedActiveSheet = resolvedActiveSheet || wb.active_sheet || wb.sheets[0]?.name || null
@@ -40,8 +64,8 @@ function loadPersistedState() {
 
 function persistState(state) {
   try {
-    const { workbookState, tabs, activeTab, activeSheet, sessionRole } = state
-    localStorage.setItem(PERSIST_KEY, JSON.stringify({ workbookState, tabs, activeTab, activeSheet, sessionRole }))
+    const { sessionId, workbookState, tabs, activeTab, activeSheet, sessionRole } = state
+    localStorage.setItem(PERSIST_KEY, JSON.stringify({ sessionId, workbookState, tabs, activeTab, activeSheet, sessionRole }))
   } catch (_) {}
 }
 
@@ -99,6 +123,8 @@ const useWorkspaceStore = create((set, get) => ({
   // workbookState shape: { sheets: SheetState[], active_sheet: string }
   workbookState: null,
   setWorkbookState: (state) => {
+    const sid = get().sessionId
+    console.debug(`[setWorkbookState] sessionId=${sid?.slice(0,8)} sheets=${(state.sheets||[]).map(s=>s.name).join(',')}`)
     const activeSheet = state.active_sheet || state.sheets?.[0]?.name || null
 
     // Build the complete tab list from the incoming workbook state.
@@ -181,6 +207,11 @@ const useWorkspaceStore = create((set, get) => ({
   // 'finance' | 'general' — set by RoleSelectModal at session start
   sessionRole: null,
   setSessionRole: (role) => set({ sessionRole: role }),
+
+  // ── Session restore status ─────────────────────────────────────────────────
+  // true while a /restore call is in flight — blocks sending messages
+  restoring: false,
+  setRestoring: (v) => set({ restoring: v }),
 
   // ── WebSocket / agent status ───────────────────────────────────────────────
   // 'disconnected' | 'connecting' | 'connected' | 'thinking'

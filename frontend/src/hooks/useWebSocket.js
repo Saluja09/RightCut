@@ -28,11 +28,19 @@ export function useWebSocket() {
 
     function dispatch(msg) {
       const s = useWorkspaceStore.getState()
+      // Guard: ignore messages from a stale WS after session switch
+      if (s.sessionId !== sessionId) {
+        console.warn(`[WS dispatch] BLOCKED stale msg type=${msg.type} — store.sessionId=${s.sessionId?.slice(0,8)} vs ws.sessionId=${sessionId?.slice(0,8)}`)
+        return
+      }
+      console.debug(`[WS dispatch] type=${msg.type} sessionId=${sessionId?.slice(0,8)}`)
       switch (msg.type) {
         case 'session_ready': {
           // If the backend session is empty but we have a saved snapshot, restore it
-          if (!msg.has_workbook && s.pendingRestore) {
+          // Skip if a restore is already in flight (eager restore from handleSelectSession)
+          if (!msg.has_workbook && s.pendingRestore && !s.restoring) {
             const { sessionId: sid, pendingRestore } = s
+            useWorkspaceStore.setState({ restoring: true })
             fetch(apiUrl(`/restore/${sid}`), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -45,19 +53,25 @@ export function useWebSocket() {
                 })),
                 role: s.sessionRole || 'general',
               }),
-            }).catch((e) => console.warn('WS-triggered restore failed:', e))
+            })
+              .then(() => useWorkspaceStore.setState({ restoring: false, pendingRestore: null }))
+              .catch((e) => {
+                console.warn('WS-triggered restore failed:', e)
+                useWorkspaceStore.setState({ restoring: false, pendingRestore: null })
+              })
+          } else {
+            useWorkspaceStore.setState({ pendingRestore: null })
           }
-          // Clear the pending restore flag regardless
-          useWorkspaceStore.setState({ pendingRestore: null })
           break
         }
         case 'tool_call':
           if (s.pendingMessageId) s.addToolStep(s.pendingMessageId, msg.step)
           break
-        case 'workbook_update':
+        case 'workbook_update': {
           s.setWorkbookState(msg.state)
           s.updateSheetCount()
           break
+        }
         case 'agent_response': {
           const id = s.pendingMessageId || crypto.randomUUID()
           // Only attach sheetRefs if the timeline includes a sheet-creating/writing tool call
@@ -136,7 +150,13 @@ export function useWebSocket() {
 
       ws.onclose = () => {
         if (unmounted.current) return
-        useWorkspaceStore.getState().setWsStatus('disconnected')
+        const st = useWorkspaceStore.getState()
+        st.setWsStatus('disconnected')
+        // Clear stuck pending message so the user can send again after reconnect
+        if (st.pendingMessageId) {
+          st.addMessage({ id: st.pendingMessageId, role: 'agent', text: '*(Connection lost — please resend your message)*', timestamp: Date.now() })
+          st.setPendingMessageId(null)
+        }
         if (attempts.current < MAX_RECONNECT_ATTEMPTS) {
           const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempts.current), 30_000)
           attempts.current++
@@ -172,6 +192,11 @@ export function useWebSocket() {
 
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       s.addMessage({ id: crypto.randomUUID(), role: 'error', text: 'Not connected. Retrying...', timestamp: Date.now() })
+      return
+    }
+
+    if (s.restoring) {
+      s.addMessage({ id: crypto.randomUUID(), role: 'error', text: 'Restoring session, please wait a moment...', timestamp: Date.now() })
       return
     }
 

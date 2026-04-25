@@ -51,6 +51,7 @@ export default function LeftSidebar({ onSelectSession }) {
       useWorkspaceStore.setState({
         sessionId: newId, messages: [], workbookState: null,
         tabs: [], activeTab: null, activeSheet: null, sessionRole: null,
+        pendingRestore: null, restoring: false, pendingMessageId: null,
       })
     }
   }
@@ -60,7 +61,7 @@ export default function LeftSidebar({ onSelectSession }) {
     const cur = useWorkspaceStore.getState()
     if (cur.sessionId && cur.workbookState) {
       try {
-        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify(cur.workbookState))
+        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify({ ...cur.workbookState, _sessionId: cur.sessionId }))
       } catch (_) {}
     }
     const newId = crypto.randomUUID()
@@ -73,6 +74,9 @@ export default function LeftSidebar({ onSelectSession }) {
       activeTab: null,
       activeSheet: null,
       sessionRole: null,   // triggers role-select modal
+      pendingRestore: null,
+      restoring: false,
+      pendingMessageId: null,
     })
   }
 

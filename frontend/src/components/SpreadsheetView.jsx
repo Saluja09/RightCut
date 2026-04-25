@@ -10,6 +10,7 @@ import {
   CellStyleModule,
   TextEditorModule,
   RowSelectionModule,
+  ValidationModule,
 } from 'ag-grid-community'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-alpine.css'
@@ -21,6 +22,7 @@ ModuleRegistry.registerModules([
   CellStyleModule,
   TextEditorModule,
   RowSelectionModule,
+  ValidationModule,
 ])
 
 export default function SpreadsheetView({ sheet, allSheets, onCellEdit }) {
@@ -47,7 +49,7 @@ export default function SpreadsheetView({ sheet, allSheets, onCellEdit }) {
       cellClass: 'excel-row-num',
       headerClass: 'excel-row-num-header',
       valueGetter: (params) => params.data.__rowIdx + 1,
-      suppressCellFocus: false,
+      suppressNavigable: true,
     }
     return [rowNumCol, ...columnDefs]
   }, [columnDefs])
@@ -120,6 +122,7 @@ export default function SpreadsheetView({ sheet, allSheets, onCellEdit }) {
         style={{ width: '100%', height: '100%' }}
       >
         <AgGridReact
+          theme="legacy"
           rowData={rowData}
           columnDefs={allColumnDefs}
           defaultColDef={defaultColDef}

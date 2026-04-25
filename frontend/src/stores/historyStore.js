@@ -181,8 +181,10 @@ const useHistoryStore = create((set, get) => ({
     if (!workbookState) return
 
     // Always save to localStorage immediately (keyed by session)
+    // Include _sessionId tag so we can detect cross-session corruption on load
     try {
-      localStorage.setItem(`rightcut_wb_${sessionId}`, JSON.stringify(workbookState))
+      const tagged = { ...workbookState, _sessionId: sessionId }
+      localStorage.setItem(`rightcut_wb_${sessionId}`, JSON.stringify(tagged))
     } catch {}
 
     if (!supabaseEnabled || !userId) return
@@ -192,7 +194,7 @@ const useHistoryStore = create((set, get) => ({
       supabase.from('workbook_snapshots').upsert({
         session_id: sessionId,
         user_id: userId,
-        snapshot: workbookState,
+        snapshot: { ...workbookState, _sessionId: sessionId },
         updated_at: new Date().toISOString(),
       }, { onConflict: 'session_id' }).then(({ error }) => {
         if (error) console.warn('saveWorkbook Supabase error:', error.message)
@@ -208,12 +210,46 @@ const useHistoryStore = create((set, get) => ({
         .select('snapshot')
         .eq('session_id', sessionId)
         .single()
-      if (data?.snapshot) return data.snapshot
+      if (data?.snapshot) {
+        const snap = data.snapshot
+        // Verify the snapshot belongs to this session (detect cross-session corruption)
+        if (snap._sessionId && snap._sessionId !== sessionId) {
+          // Corrupted entry — delete it
+          supabase.from('workbook_snapshots').delete().eq('session_id', sessionId)
+          return null
+        }
+        // Old entry without tag — could be corrupted, discard it
+        if (!snap._sessionId) {
+          supabase.from('workbook_snapshots').delete().eq('session_id', sessionId)
+          return null
+        }
+        // Remove the internal tag before returning
+        const { _sessionId, ...wb } = snap
+        return wb
+      }
     }
-    // Fallback to localStorage
+    // Fallback to per-session localStorage key
     try {
       const raw = localStorage.getItem(`rightcut_wb_${sessionId}`)
-      if (raw) return JSON.parse(raw)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        // Verify this workbook belongs to the requested session (detect cross-session corruption)
+        if (parsed._sessionId && parsed._sessionId !== sessionId) {
+          localStorage.removeItem(`rightcut_wb_${sessionId}`)  // clean up corrupted key
+          return null
+        }
+        // Remove the internal tag before returning
+        if (parsed._sessionId) {
+          const { _sessionId, ...wb } = parsed
+          return wb
+        }
+        // Old entry without session tag — potentially corrupted by a previous
+        // bug that saved the wrong workbook under this session's key.
+        // Delete it to prevent cross-session data leaks. The workbook will
+        // be re-saved correctly (with tag) the next time this session is active.
+        localStorage.removeItem(`rightcut_wb_${sessionId}`)
+        return null
+      }
     } catch {}
     return null
   },
