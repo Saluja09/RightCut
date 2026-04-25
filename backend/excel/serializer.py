@@ -40,7 +40,19 @@ def serialize_workbook(
 def _serialize_sheet(ws, charts: list[ChartMeta]) -> SheetState:
     """Serialize a single worksheet."""
     max_row = ws.max_row or 1
-    max_col = ws.max_column or 1
+    raw_max_col = ws.max_column or 1
+
+    # Determine the real data extent: the last column with a non-empty header.
+    # Columns beyond this are typically chart-helper columns the agent wrote
+    # (e.g. duplicate Category/Percentage columns for chart References) and
+    # should NOT appear in the frontend grid.
+    max_col = 0
+    for col_idx in range(1, raw_max_col + 1):
+        hdr = ws.cell(row=1, column=col_idx).value
+        if hdr is not None and str(hdr).strip() != "":
+            max_col = col_idx
+    if max_col == 0:
+        max_col = raw_max_col  # fallback: no headers at all, keep everything
 
     # Collect merged cell ranges so we can handle them
     merged: set[str] = set()

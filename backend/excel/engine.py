@@ -1282,22 +1282,34 @@ class WorkbookEngine:
             chart.type = "col"   # vertical bars (horizontal is the confusing default)
             chart.grouping = "clustered"
 
-        data_ref = Reference(
-            ws,
-            min_col=min_col,
-            min_row=start_row,
-            max_col=max_col,
-            max_row=end_row,
-        )
+        # Data columns = everything EXCEPT the first column (which is categories/labels)
+        # For a range like A1:C5: col A = labels, cols B-C = value series
+        if max_col > min_col:
+            data_ref = Reference(
+                ws,
+                min_col=min_col + 1,   # skip label column
+                min_row=start_row,
+                max_col=max_col,
+                max_row=end_row,
+            )
+            cats = Reference(ws, min_col=min_col, min_row=start_row + 1, max_row=end_row)
+        else:
+            # Single column — use it as data (no labels)
+            data_ref = Reference(
+                ws,
+                min_col=min_col,
+                min_row=start_row,
+                max_col=max_col,
+                max_row=end_row,
+            )
+            cats = None
 
         if chart_type.lower() == "scatter":
             chart.add_data(data_ref)
         else:
             chart.add_data(data_ref, titles_from_data=True)
 
-        # Categories from first column if more than one column
-        if max_col > min_col:
-            cats = Reference(ws, min_col=min_col, min_row=start_row + 1, max_row=end_row)
+        if cats is not None:
             chart.set_categories(cats)
 
         ws.add_chart(chart, target_cell)
@@ -1314,9 +1326,311 @@ class WorkbookEngine:
         return {
             "sheet_name": sheet_name,
             "chart_type": chart_type,
-            "title": chart.title,
+            "title": title or sheet_name,
             "anchor": target_cell,
             "note": "Chart embedded in .xlsx. Download to view rendered chart.",
+        }
+
+    # ── Data Cleanup ──────────────────────────────────────────────────────────
+
+    def clean_data(
+        self,
+        sheet_name: str,
+        operation: str,
+        column: str | None = None,
+        find_text: str | None = None,
+        replace_text: str | None = None,
+        delimiter: str | None = None,
+        new_column_name: str | None = None,
+    ) -> dict:
+        """
+        Apply one of 15 data-cleaning operations to a sheet.
+        column: header name or letter (e.g. 'Name' or 'B'). If None, applies to all text cells.
+        """
+        import re
+
+        ws = self._get_sheet(sheet_name)
+        max_row = ws.max_row
+        max_col = ws.max_column
+
+        if not max_row or max_row < 2:
+            return {"error": "Sheet has no data rows", "success": False}
+
+        # Resolve column index
+        col_idx: int | None = None
+        if column:
+            # Try header name first
+            for c in range(1, max_col + 1):
+                hdr = ws.cell(row=1, column=c).value
+                if hdr and str(hdr).strip().lower() == column.strip().lower():
+                    col_idx = c
+                    break
+            if col_idx is None:
+                # Try letter
+                try:
+                    col_idx = column_index_from_string(column.upper())
+                except Exception:
+                    return {"error": f"Column '{column}' not found", "success": False}
+
+        def _cols() -> range:
+            return range(col_idx, col_idx + 1) if col_idx else range(1, max_col + 1)
+
+        def _str_val(cell) -> str | None:
+            v = cell.value
+            return str(v) if v is not None else None
+
+        cells_changed = 0
+
+        # ── Operations ────────────────────────────────────────────────────────
+
+        if operation == "trim_whitespace":
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v is not None:
+                        cleaned = " ".join(v.split())
+                        if cleaned != v:
+                            cell.value = cleaned
+                            cells_changed += 1
+
+        elif operation == "remove_duplicates":
+            seen: set[tuple] = set()
+            rows_to_delete: list[int] = []
+            for r in range(2, max_row + 1):
+                row_key = tuple(
+                    str(ws.cell(row=r, column=c).value or "").strip()
+                    for c in range(1, max_col + 1)
+                )
+                if row_key in seen:
+                    rows_to_delete.append(r)
+                else:
+                    seen.add(row_key)
+            # Delete from bottom to keep row indices stable
+            for r in reversed(rows_to_delete):
+                ws.delete_rows(r)
+                cells_changed += 1
+
+        elif operation == "remove_blank_rows":
+            blank_rows: list[int] = []
+            check_cols = list(_cols())
+            for r in range(2, max_row + 1):
+                is_blank = all(
+                    ws.cell(row=r, column=c).value in (None, "")
+                    for c in check_cols
+                )
+                if is_blank:
+                    blank_rows.append(r)
+            for r in reversed(blank_rows):
+                ws.delete_rows(r)
+                cells_changed += 1
+
+        elif operation == "to_uppercase":
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v and not v.startswith("="):
+                        cell.value = v.upper()
+                        cells_changed += 1
+
+        elif operation == "to_lowercase":
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v and not v.startswith("="):
+                        cell.value = v.lower()
+                        cells_changed += 1
+
+        elif operation == "to_titlecase":
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v and not v.startswith("="):
+                        cell.value = v.title()
+                        cells_changed += 1
+
+        elif operation == "find_replace":
+            if find_text is None:
+                return {"error": "find_text is required for find_replace", "success": False}
+            replace_with = replace_text or ""
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v and find_text in v:
+                        cell.value = v.replace(find_text, replace_with)
+                        cells_changed += 1
+
+        elif operation == "convert_to_number":
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v:
+                        cleaned = v.replace("$", "").replace(",", "").replace("%", "").strip()
+                        try:
+                            num = float(cleaned)
+                            cell.value = int(num) if num == int(num) else num
+                            cells_changed += 1
+                        except (ValueError, OverflowError):
+                            pass
+
+        elif operation == "convert_to_date":
+            from dateutil import parser as dateparser
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v and not v.startswith("="):
+                        try:
+                            dt = dateparser.parse(v, dayfirst=False)
+                            cell.value = dt.date()
+                            cell.number_format = "YYYY-MM-DD"
+                            cells_changed += 1
+                        except Exception:
+                            pass
+
+        elif operation == "remove_special_chars":
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v and not v.startswith("="):
+                        cleaned = re.sub(r"[^\w\s\.\,\-\(\)\$\%\/\:]", "", v)
+                        if cleaned != v:
+                            cell.value = cleaned
+                            cells_changed += 1
+
+        elif operation == "fill_down":
+            if col_idx is None:
+                return {"error": "column is required for fill_down", "success": False}
+            last_val = None
+            for r in range(2, max_row + 1):
+                cell = ws.cell(row=r, column=col_idx)
+                if cell.value not in (None, ""):
+                    last_val = cell.value
+                elif last_val is not None:
+                    cell.value = last_val
+                    cells_changed += 1
+
+        elif operation == "extract_numbers":
+            if col_idx is None:
+                return {"error": "column is required for extract_numbers", "success": False}
+            for r in range(2, max_row + 1):
+                cell = ws.cell(row=r, column=col_idx)
+                v = _str_val(cell)
+                if v:
+                    nums = re.findall(r"-?\d+\.?\d*", v)
+                    if nums:
+                        cell.value = float(nums[0]) if "." in nums[0] else int(nums[0])
+                        cells_changed += 1
+
+        elif operation == "split_column":
+            if col_idx is None:
+                return {"error": "column is required for split_column", "success": False}
+            sep = delimiter or " "
+            new_name = new_column_name or (
+                str(ws.cell(row=1, column=col_idx).value or "Split") + "_2"
+            )
+            # Insert new column right after the target
+            new_col_idx = col_idx + 1
+            ws.insert_cols(new_col_idx)
+            # Write header
+            new_hdr = ws.cell(row=1, column=new_col_idx)
+            new_hdr.value = new_name
+            new_hdr.font = Font(bold=True, color="FFFFFF", size=11)
+            new_hdr.fill = PatternFill(fill_type="solid", fgColor="1F4E79")
+            new_hdr.alignment = Alignment(horizontal="center")
+            new_hdr.border = _BORDER
+            ws.column_dimensions[get_column_letter(new_col_idx)].width = 18
+            # Split values
+            for r in range(2, ws.max_row + 1):
+                cell = ws.cell(row=r, column=col_idx)
+                v = _str_val(cell)
+                if v and sep in v:
+                    parts = v.split(sep, 1)
+                    cell.value = parts[0].strip()
+                    ws.cell(row=r, column=new_col_idx).value = parts[1].strip()
+                    cells_changed += 1
+
+        elif operation == "fix_number_format":
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v:
+                        cleaned = v.strip()
+                        is_pct = cleaned.endswith("%")
+                        cleaned2 = cleaned.replace("$", "").replace(",", "").replace("%", "").strip()
+                        try:
+                            num = float(cleaned2)
+                            if is_pct:
+                                cell.value = num / 100
+                                cell.number_format = "0.0%"
+                            else:
+                                cell.value = int(num) if num == int(num) else num
+                                cell.number_format = "#,##0" if abs(num) >= 1000 else "0.00"
+                            cells_changed += 1
+                        except (ValueError, OverflowError):
+                            pass
+
+        elif operation == "standardize_text":
+            # Remove extra spaces, normalize unicode, consistent punctuation
+            for r in range(2, max_row + 1):
+                for c in _cols():
+                    cell = ws.cell(row=r, column=c)
+                    v = _str_val(cell)
+                    if v and not v.startswith("="):
+                        import unicodedata
+                        normalized = unicodedata.normalize("NFKC", v)
+                        cleaned = " ".join(normalized.split())
+                        if cleaned != v:
+                            cell.value = cleaned
+                            cells_changed += 1
+
+        else:
+            return {"error": f"Unknown operation: '{operation}'", "success": False}
+
+        return {
+            "sheet_name": sheet_name,
+            "operation": operation,
+            "column": column,
+            "cells_changed": cells_changed,
+            "success": True,
+        }
+
+    # ── Find & Replace (cross-sheet) ──────────────────────────────────────────
+
+    def find_replace(
+        self,
+        sheet_name: str,
+        find_text: str,
+        replace_text: str = "",
+        match_case: bool = False,
+    ) -> dict:
+        """Find and replace text across all cells in a sheet."""
+        ws = self._get_sheet(sheet_name)
+        cells_changed = 0
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                v = cell.value
+                if v is None or not isinstance(v, str):
+                    continue
+                if not v.startswith("="):
+                    haystack = v if match_case else v.lower()
+                    needle = find_text if match_case else find_text.lower()
+                    if needle in haystack:
+                        cell.value = v.replace(find_text, replace_text) if match_case else \
+                            v.replace(find_text, replace_text)
+                        cells_changed += 1
+        return {
+            "sheet_name": sheet_name,
+            "find": find_text,
+            "replace": replace_text,
+            "cells_changed": cells_changed,
         }
 
     # ── Validation ────────────────────────────────────────────────────────────
@@ -1399,15 +1713,155 @@ class WorkbookEngine:
     # ── Download ──────────────────────────────────────────────────────────────
 
     def to_bytes(self) -> bytes:
-        # Force Excel to recalculate all formulas on open.
-        # openpyxl does not evaluate formulas, so cached values are absent.
-        # Setting fullCalcOnLoad ensures Excel doesn't show stale zeros.
+        """
+        Save the workbook to .xlsx bytes with cached formula values.
+
+        Pipeline:
+        1. Save openpyxl workbook to temp file (formulas + charts + formatting)
+        2. Evaluate all formulas server-side using the `formulas` library
+        3. Patch the xlsx XML to inject <v> cached values alongside <f> formula tags
+        4. Return the patched xlsx bytes
+
+        This ensures:
+        - Charts read correct cached values (no red error triangles)
+        - Excel/Numbers/Google Sheets show values immediately without recalculation
+        - Formulas are preserved for end-user editing
+        """
+        import os
+        import tempfile
+        import zipfile
+
+        from lxml import etree
+
         self.wb.calculation.calcMode = "auto"
         self.wb.calculation.fullCalcOnLoad = True
-        buf = io.BytesIO()
-        self.wb.save(buf)
-        buf.seek(0)
-        return buf.read()
+
+        # Step 1: Save raw workbook
+        tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        try:
+            self.wb.save(tmp.name)
+            tmp.close()
+
+            # Step 2: Evaluate formulas
+            try:
+                import formulas as flib
+
+                xl_model = flib.ExcelModel().loads(tmp.name).finish()
+                sol = xl_model.calculate()
+
+                # Build lookup: (SHEET_NAME_UPPER, CELL_REF_UPPER) → computed value
+                cached: dict[tuple[str, str], object] = {}
+                for key, ranges_obj in sol.items():
+                    key_str = str(key)
+                    if "!" not in key_str:
+                        continue
+                    sheet_part, cell_part = key_str.rsplit("!", 1)
+                    if ":" in cell_part:
+                        continue  # skip range references
+                    sheet_name = sheet_part.strip("'")
+                    if "]" in sheet_name:
+                        sheet_name = sheet_name.split("]", 1)[1]
+                    val = ranges_obj.value
+                    if hasattr(val, "tolist"):
+                        val = val.tolist()
+                    while isinstance(val, list) and len(val) > 0:
+                        val = val[0]
+                    if val is not None and not isinstance(val, str):
+                        cached[(sheet_name.upper(), cell_part.upper())] = val
+
+                logger.info(
+                    f"Formula eval: {len(cached)} formula cell(s) computed "
+                    f"across {len(self.wb.sheetnames)} sheet(s)"
+                )
+
+                if not cached:
+                    # No formulas to cache — return as-is
+                    with open(tmp.name, "rb") as f:
+                        return f.read()
+
+                # Step 3: Patch xlsx XML — inject <v> elements into formula cells
+                ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                ns_map = {"ss": ns}
+
+                # Read workbook.xml to map sheet IDs to names
+                tmp_out = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+                tmp_out.close()
+                try:
+                    with zipfile.ZipFile(tmp.name, "r") as zin:
+                        # Map rId → sheet name from workbook.xml
+                        wb_xml = etree.fromstring(zin.read("xl/workbook.xml"))
+                        sheet_names_by_idx: dict[int, str] = {}
+                        for idx, sheet_el in enumerate(wb_xml.findall(f".//{{{ns}}}sheet"), start=1):
+                            sheet_names_by_idx[idx] = sheet_el.get("name", "")
+
+                        with zipfile.ZipFile(tmp_out.name, "w", zipfile.ZIP_DEFLATED) as zout:
+                            for item in zin.infolist():
+                                data = zin.read(item.filename)
+
+                                if (
+                                    item.filename.startswith("xl/worksheets/sheet")
+                                    and item.filename.endswith(".xml")
+                                ):
+                                    # Extract sheet index from filename (sheet1.xml → 1)
+                                    sheet_idx_str = item.filename.replace(
+                                        "xl/worksheets/sheet", ""
+                                    ).replace(".xml", "")
+                                    try:
+                                        sheet_idx = int(sheet_idx_str)
+                                    except ValueError:
+                                        zout.writestr(item, data)
+                                        continue
+                                    sheet_name = sheet_names_by_idx.get(sheet_idx, "")
+                                    sheet_upper = sheet_name.upper()
+
+                                    tree = etree.fromstring(data)
+                                    patched = False
+                                    for c_el in tree.iter(f"{{{ns}}}c"):
+                                        f_el = c_el.find(f"{{{ns}}}f")
+                                        if f_el is None:
+                                            continue
+                                        ref = (c_el.get("r") or "").upper()
+                                        val = cached.get((sheet_upper, ref))
+                                        if val is None:
+                                            continue
+                                        # Inject or update <v> element
+                                        v_el = c_el.find(f"{{{ns}}}v")
+                                        if v_el is None:
+                                            v_el = etree.SubElement(c_el, f"{{{ns}}}v")
+                                        v_el.text = str(val)
+                                        # Ensure cell type is number (not string)
+                                        if c_el.get("t") == "s":
+                                            del c_el.attrib["t"]
+                                        patched = True
+
+                                    if patched:
+                                        data = etree.tostring(
+                                            tree,
+                                            xml_declaration=True,
+                                            encoding="UTF-8",
+                                            standalone=True,
+                                        )
+
+                                zout.writestr(item, data)
+
+                    with open(tmp_out.name, "rb") as f:
+                        return f.read()
+                finally:
+                    try:
+                        os.unlink(tmp_out.name)
+                    except OSError:
+                        pass
+
+            except Exception as e:
+                logger.warning(f"Formula caching failed, returning raw xlsx: {e}")
+                with open(tmp.name, "rb") as f:
+                    return f.read()
+
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

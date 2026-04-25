@@ -22,7 +22,9 @@ const TOOL_META = {
   create_chart:         { Icon: BarChart2,        label: 'Create chart'         },
   validate_workbook:    { Icon: ShieldCheck,      label: 'Validate workbook'    },
   get_sheet_state:      { Icon: Layers,           label: 'Read sheet'           },
+  get_all_sheet_names:  { Icon: Layers,           label: 'List sheets'          },
   create_model_scaffold:{ Icon: Layers,           label: 'Build model scaffold' },
+  clean_data:           { Icon: Settings2,        label: 'Clean data'           },
 }
 
 function getMeta(toolName) {
@@ -81,7 +83,7 @@ export default function ToolTimeline({ steps = [], isLive = false }) {
 
       {(expanded || isLive) && (
         <div className="tl-steps">
-          {(isLive ? steps : steps).map((step, i) => {
+          {steps.map((step, i) => {
             const isLast = i === steps.length - 1
             const isPending = step.success === undefined
             const isErr = step.success === false
@@ -89,7 +91,7 @@ export default function ToolTimeline({ steps = [], isLive = false }) {
             const subtitle = getSubtitle(step.tool, step.args)
 
             return (
-              <div key={i} className="tl-step">
+              <div key={`${step.tool}_${i}`} className="tl-step">
                 {/* Vertical connector line */}
                 <div className="tl-connector">
                   <div className={`tl-dot ${isErr ? 'tl-dot--err' : isPending ? 'tl-dot--pending' : 'tl-dot--done'}`} />

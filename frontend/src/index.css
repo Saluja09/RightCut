@@ -324,6 +324,19 @@ html, body, #root {
 
 .sidebar-session-group { display: flex; flex-direction: column; }
 
+/* Row wraps the session button + delete button */
+.sidebar-session-row {
+  display: flex;
+  align-items: center;
+  position: relative;
+  border-radius: var(--radius-md);
+}
+
+.sidebar-session-row:hover .sidebar-session-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .sidebar-session-item {
   display: flex;
   align-items: center;
@@ -339,15 +352,35 @@ html, body, #root {
   padding: 6px 8px;
   text-align: left;
   transition: all 0.1s;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
 }
-.sidebar-session-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.sidebar-session-row:hover .sidebar-session-item { background: var(--bg-hover); color: var(--text-primary); }
 .sidebar-session-item--active {
   background: var(--accent-light);
   color: var(--accent);
   font-weight: 500;
 }
+.sidebar-session-row:hover .sidebar-session-item--active { background: var(--accent-light); }
+
+.sidebar-session-delete {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s, color 0.12s;
+  margin-right: 2px;
+}
+.sidebar-session-delete:hover { color: var(--text-danger); }
+.sidebar-session-delete:disabled { opacity: 0.3; cursor: not-allowed; }
 
 .sidebar-session-chevron { color: var(--text-muted); flex-shrink: 0; display: flex; align-items: center; }
 .sidebar-session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2219,6 +2252,49 @@ html, body, #root {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 11px;
   color: var(--accent);
+}
+
+/* ── Chart View ─────────────────────────────────────────────────────────────── */
+
+.chart-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 24px 28px 16px;
+  background: var(--bg-panel);
+  overflow: auto;
+}
+
+.chart-view-inner {
+  flex: 1;
+  position: relative;
+  min-height: 300px;
+  max-height: 520px;
+}
+
+.chart-view-meta {
+  margin-top: 14px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.chart-view-meta code {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  background: var(--bg-code);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.chart-view-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 /* ── Role Select Modal ───────────────────────────────────────────────────────── */

@@ -2,8 +2,10 @@ import { BarChart3, Download } from 'lucide-react'
 import SheetTabs from './TabBar'
 import SpreadsheetView from './SpreadsheetView'
 import DocumentView from './DocumentView'
+import ChartView from './ChartView'
 import useWorkspaceStore from '../stores/workspaceStore'
 import { useWorkbook } from '../hooks/useWorkbook'
+import { apiUrl } from '../utils/api'
 
 export default function PreviewPanel({ sessionId, onCellEdit }) {
   const activeTab     = useWorkspaceStore((s) => s.activeTab)
@@ -17,7 +19,22 @@ export default function PreviewPanel({ sessionId, onCellEdit }) {
   const handleDownload = async () => {
     if (!sessionId) return
     try {
-      const res = await fetch(`/download/${sessionId}`)
+      // Ensure the backend engine has the workbook before downloading.
+      // If the session was loaded from storage, the engine may be empty —
+      // restore it first from the workbook state we already have in the store.
+      if (workbookState?.sheets?.length) {
+        await fetch(apiUrl(`/restore/${sessionId}`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workbook_state: workbookState,
+            messages: [],
+            role: useWorkspaceStore.getState().sessionRole || 'general',
+          }),
+        })
+      }
+
+      const res = await fetch(apiUrl(`/download/${sessionId}`))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         alert(err.detail || 'Download failed. Please re-run your analysis to regenerate the workbook.')
@@ -53,6 +70,8 @@ export default function PreviewPanel({ sessionId, onCellEdit }) {
           <WelcomeState />
         ) : activeTabInfo?.type === 'document' ? (
           <DocumentView fileId={activeTab} />
+        ) : activeTabInfo?.type === 'chart' ? (
+          <ChartView sheetName={activeTabInfo.sheetName} chartIndex={activeTabInfo.chartIndex} />
         ) : (
           <SpreadsheetView sheet={currentSheet} allSheets={workbookState?.sheets} onCellEdit={onCellEdit} />
         )}

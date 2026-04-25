@@ -5,6 +5,7 @@
  */
 import { useState } from 'react'
 import { Briefcase, GraduationCap } from 'lucide-react'
+import { apiUrl } from '../utils/api'
 
 const ROLES = [
   {
@@ -33,7 +34,7 @@ export default function RoleSelectModal({ sessionId, onConfirm }) {
     if (!selected || loading) return
     setLoading(true)
     try {
-      await fetch(`/configure/${sessionId}`, {
+      await fetch(apiUrl(`/configure/${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role: selected }),

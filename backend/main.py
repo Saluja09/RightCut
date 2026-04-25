@@ -9,6 +9,8 @@ import asyncio
 import datetime
 import io
 import logging
+import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,16 +24,27 @@ from pydantic import BaseModel
 from agent.orchestrator import AgentOrchestrator
 from agent.prompts import CELL_EDIT_CONTEXT_TEMPLATE, DOCUMENT_UPLOAD_CONTEXT_TEMPLATE, get_system_prompt
 from agent.tools import ToolExecutor
-from config import CORS_ORIGINS, GEMINI_API_KEY, GEMINI_MODEL, SESSION_TTL_HOURS, UPLOAD_MAX_SIZE_MB
+from config import CORS_ORIGINS, GEMINI_API_KEY, GEMINI_MODEL, MAX_TOOL_ITERATIONS, SESSION_TTL_HOURS, UPLOAD_MAX_SIZE_MB
 from excel.engine import WorkbookEngine
 from models import ParsedDocument
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s │ %(levelname)-5s │ %(name)-20s │ %(message)s",
+    datefmt="%H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+# Quiet noisy libraries
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("websockets").setLevel(logging.WARNING)
+logging.getLogger("formulas").setLevel(logging.WARNING)
+logging.getLogger("schedula").setLevel(logging.WARNING)
+
+logger = logging.getLogger("rightcut")
 
 # ── Application ───────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -60,7 +73,7 @@ class WorkspaceSession:
     cell_edit_buffer: list[dict] = field(default_factory=list)
     created_at: datetime.datetime = field(default_factory=datetime.datetime.utcnow)
     last_active: datetime.datetime = field(default_factory=datetime.datetime.utcnow)
-    session_role: str = "finance"   # "finance" | "general"
+    session_role: str = "general"   # "finance" | "general"
 
 
 sessions: dict[str, WorkspaceSession] = {}
@@ -90,7 +103,17 @@ async def _cleanup_sessions() -> None:
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(_cleanup_sessions())
-    logger.info("RightCut API started")
+    logger.info(
+        f"RightCut API started — model={GEMINI_MODEL}  "
+        f"max_tools={MAX_TOOL_ITERATIONS}  session_ttl={SESSION_TTL_HOURS}h  "
+        f"log_level={LOG_LEVEL}"
+    )
+    # Validate formulas library is available for xlsx export
+    try:
+        import formulas  # noqa: F401
+        logger.info("Formula evaluation: formulas library available ✓")
+    except ImportError:
+        logger.warning("Formula evaluation: formulas library NOT installed — xlsx will lack cached values")
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
@@ -111,6 +134,7 @@ class RestoreMessageItem(BaseModel):
 class RestoreRequest(BaseModel):
     workbook_state: dict | None = None   # WorkbookState JSON from frontend
     messages: list[RestoreMessageItem] = []
+    role: str = "general"                # "finance" | "general" — persists agent persona
 
 
 @app.post("/restore/{session_id}")
@@ -122,6 +146,10 @@ async def restore_session(session_id: str, body: RestoreRequest) -> dict:
     agent operates on the correct workbook when the user sends the next message.
     """
     session = get_or_create_session(session_id)
+
+    # ── 0. Restore role ────────────────────────────────────────────────────
+    valid_roles = {"finance", "general"}
+    session.session_role = body.role if body.role in valid_roles else "general"
 
     # ── 1. Rebuild WorkbookEngine from snapshot ────────────────────────────
     sheets_restored = 0
@@ -167,6 +195,19 @@ async def restore_session(session_id: str, body: RestoreRequest) -> dict:
                 for r, c, formula in formula_cells:
                     ws.cell(row=r, column=c).value = formula
 
+            # Restore charts — re-create openpyxl chart objects and repopulate _charts
+            for chart_data in (sheet_data.get("charts") or []):
+                try:
+                    engine.create_chart(
+                        sheet_name=sheet_name,
+                        chart_type=chart_data.get("chart_type", "bar"),
+                        data_range=chart_data.get("data_range", "A1:B2"),
+                        title=chart_data.get("title", ""),
+                        target_cell=chart_data.get("anchor_cell", "H2"),
+                    )
+                except Exception as chart_err:
+                    logger.warning(f"Restore: could not recreate chart in '{sheet_name}': {chart_err}")
+
             sheets_restored += 1
 
         session.engine = engine
@@ -192,6 +233,39 @@ async def restore_session(session_id: str, body: RestoreRequest) -> dict:
                     types.Content(role="model", parts=[types.Part.from_text(text=text)])
                 )
             # Skip system/error/agent_pending messages — not relevant to Gemini context
+
+        # ── Inject a workbook-state anchor at the END of restored history ──
+        # This prevents the model from treating short follow-ups ("redo", "again")
+        # as continuations of an old financial model task from prior turns.
+        # The anchor describes the CURRENT workbook and acts as ground truth.
+        if history and session.engine:
+            sheet_names = session.engine.get_all_sheet_names()
+            if sheet_names:
+                sheets_summary = ", ".join(f'"{s}"' for s in sheet_names)
+                anchor = (
+                    f"[SESSION CONTEXT: The current workbook contains {len(sheet_names)} sheet(s): "
+                    f"{sheets_summary}. "
+                    "When the user's next message is a short follow-up (e.g. 'redo', 'do it again', "
+                    "'try again', 'again', 'repeat'), interpret it as a request to redo the MOST RECENT "
+                    "completed task visible in the current workbook — NOT as a continuation of any "
+                    "financial modelling task from earlier in this conversation. "
+                    "Always base your interpretation of short commands on the current workbook state.]"
+                )
+                history.append(
+                    types.Content(role="user", parts=[types.Part.from_text(text=anchor)])
+                )
+                # Add a model acknowledgement so the conversation alternates correctly
+                history.append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(
+                            text=f"Understood. I can see the current workbook has {len(sheet_names)} sheet(s): "
+                                 f"{sheets_summary}. I'll interpret follow-up commands relative to the "
+                                 "current workbook state."
+                        )],
+                    )
+                )
+
         session.conversation_history = history
         logger.info(
             f"Restore session {session_id}: rebuilt {len(history)} conversation turns"
@@ -208,14 +282,14 @@ async def restore_session(session_id: str, body: RestoreRequest) -> dict:
 # ── Session configuration ─────────────────────────────────────────────────────
 
 class ConfigureRequest(BaseModel):
-    role: str = "finance"   # "finance" | "general"
+    role: str = "general"   # "finance" | "general"
 
 
 @app.post("/configure/{session_id}")
 async def configure_session(session_id: str, body: ConfigureRequest) -> dict:
     """Set session-level configuration such as the agent role/persona."""
     valid_roles = {"finance", "general"}
-    role = body.role if body.role in valid_roles else "finance"
+    role = body.role if body.role in valid_roles else "general"
     session = get_or_create_session(session_id)
     session.session_role = role
     logger.info(f"Session {session_id}: role set to '{role}'")
@@ -399,9 +473,16 @@ async def download_workbook(session_id: str) -> StreamingResponse:
         raise HTTPException(status_code=404, detail="No sheets in workbook yet")
 
     try:
+        t0 = time.perf_counter()
         xlsx_bytes = session.engine.to_bytes()
+        elapsed = round((time.perf_counter() - t0) * 1000)
+        sheets = session.engine.get_all_sheet_names()
+        logger.info(
+            f"[{session_id[:8]}] download: {len(xlsx_bytes):,} bytes, "
+            f"{len(sheets)} sheet(s), formula eval {elapsed}ms"
+        )
     except Exception as e:
-        logger.exception(f"Failed to serialize workbook for session {session_id}: {e}")
+        logger.exception(f"[{session_id[:8]}] download FAILED: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate workbook: {e}")
 
     return StreamingResponse(
@@ -449,8 +530,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
                 if not text:
                     continue
 
+                msg_preview = text[:80] + ("..." if len(text) > 80 else "")
+                logger.info(f"[{session_id[:8]}] ← user_message: {msg_preview}")
+
                 # Inject any buffered cell edits as context
+                edits_flushed = len(session.cell_edit_buffer)
                 _flush_cell_edit_buffer(session)
+                if edits_flushed:
+                    logger.info(f"[{session_id[:8]}]   flushed {edits_flushed} buffered cell edit(s)")
 
                 # Inject document upload context messages for any new files
                 uploaded_files: list[dict] = data.get("files", [])
@@ -458,6 +545,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
                     fid = f.get("file_id")
                     doc = session.documents.get(fid)
                     if doc:
+                        logger.info(f"[{session_id[:8]}]   attaching doc context: {doc.filename} (id={fid})")
                         ctx = DOCUMENT_UPLOAD_CONTEXT_TEMPLATE.format(
                             filename=doc.filename,
                             file_id=fid,
@@ -472,6 +560,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
 
                 executor = ToolExecutor(session.engine, session.documents)
 
+                t0 = time.perf_counter()
                 try:
                     await orchestrator.run(
                         user_message=text,
@@ -481,11 +570,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
                         websocket=websocket,
                         system_prompt=get_system_prompt(session.session_role),
                     )
+                    elapsed = time.perf_counter() - t0
+                    sheets = session.engine.get_all_sheet_names()
+                    logger.info(
+                        f"[{session_id[:8]}] → agent done in {elapsed:.1f}s  "
+                        f"sheets={sheets}  history_turns={len(session.conversation_history)}"
+                    )
                 except Exception as e:
-                    logger.exception(f"Agent error in session {session_id}: {e}")
+                    elapsed = time.perf_counter() - t0
+                    logger.exception(
+                        f"[{session_id[:8]}] ✗ agent error after {elapsed:.1f}s: {e}"
+                    )
+                    err_str = str(e)
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                        user_msg = "API quota exceeded. Please wait a moment and try again, or check your Gemini API plan."
+                    elif "503" in err_str or "unavailable" in err_str.lower() or "overloaded" in err_str.lower():
+                        user_msg = "The AI service is temporarily unavailable. Please try again in a moment."
+                    else:
+                        user_msg = "Something went wrong. Please try again."
                     await websocket.send_json({
                         "type": "error",
-                        "message": f"Agent encountered an error: {str(e)[:300]}",
+                        "message": user_msg,
                     })
 
             elif msg_type == "cell_edit":
@@ -496,6 +601,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
                 new_val = data.get("new", "")
 
                 if sheet and cell:
+                    logger.debug(
+                        f"[{session_id[:8]}] cell_edit: {sheet}!{cell} "
+                        f"'{str(old_val)[:30]}' → '{str(new_val)[:30]}'"
+                    )
                     # Apply to workbook immediately
                     session.engine.apply_user_edit(sheet, cell, new_val)
                     # Buffer for context injection
@@ -508,9 +617,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
                     })
 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected: session={session_id}")
+        logger.info(f"[{session_id[:8]}] ws disconnected")
     except Exception as e:
-        logger.exception(f"WebSocket error in session {session_id}: {e}")
+        logger.exception(f"[{session_id[:8]}] ws error: {e}")
         try:
             await websocket.send_json({"type": "error", "message": str(e)[:300]})
         except Exception:
@@ -540,3 +649,8 @@ def _flush_cell_edit_buffer(session: WorkspaceSession) -> None:
         )
 
     session.cell_edit_buffer.clear()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

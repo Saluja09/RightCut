@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import MessageBubble from './MessageBubble'
 import useWorkspaceStore from '../stores/workspaceStore'
+import { apiUrl } from '../utils/api'
 
 function fileIcon(fileType) {
   if (!fileType) return <FileText size={13} />
@@ -42,7 +43,7 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
   const handleDownloadSummary = async (format = 'md') => {
     if (!sessionId) return
     try {
-      const res = await fetch(`/summary/${sessionId}?format=${format}`)
+      const res = await fetch(apiUrl(`/summary/${sessionId}?format=${format}`))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         alert(err.detail || 'Failed to generate summary.')
@@ -194,7 +195,7 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
       try {
         const formData = new FormData()
         formData.append('file', file)
-        const res = await fetch(`/upload/${sessionId}`, { method: 'POST', body: formData })
+        const res = await fetch(apiUrl(`/upload/${sessionId}`), { method: 'POST', body: formData })
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: 'Upload failed' }))
           useWorkspaceStore.getState().addMessage({
@@ -384,9 +385,9 @@ function EmptyChat({ onPromptClick }) {
         Ask RightCut to build a model, or upload a document and use @ to reference it.
       </div>
       <div className="empty-chat-prompts">
-        {QUICK_PROMPTS.map(({ icon: Icon, text }, i) => (
+        {QUICK_PROMPTS.map(({ icon: Icon, text }) => (
           <button
-            key={i}
+            key={text}
             className="empty-chat-prompt"
             onClick={() => onPromptClick?.(text)}
           >

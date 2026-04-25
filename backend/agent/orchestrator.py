@@ -87,6 +87,21 @@ class AgentOrchestrator:
         timeline: list[ToolStep] = []
         iteration = 0
 
+        def _flush_history_from_contents() -> None:
+            """
+            Copy the completed working contents back into conversation_history.
+            Called on both clean exit and error exit so the model always has context.
+            Skips the initial user message (index 0 in contents = len(history) at entry)
+            to avoid double-appending.
+            """
+            existing_len = len(conversation_history)
+            # contents[0..existing_len-1] are the pre-existing history items we copied in
+            # contents[existing_len] is the new user message (not yet in history)
+            # everything from existing_len onward is new this turn
+            new_items = contents[existing_len:]
+            if new_items:
+                conversation_history.extend(new_items)
+
         while iteration < MAX_TOOL_ITERATIONS:
             iteration += 1
 
@@ -139,11 +154,8 @@ class AgentOrchestrator:
                     "timeline": [s.model_dump() for s in timeline],
                 })
 
-                # ── Append completed turn to persistent history ───────────────
-                conversation_history.append(
-                    types.Content(role="user", parts=[types.Part.from_text(text=user_message)])
-                )
-                conversation_history.append(candidate.content)
+                # ── Flush completed turn into persistent history ──────────────
+                _flush_history_from_contents()
 
                 # ── Run compaction pipeline on persistent history ─────────────
                 tokens_before = estimate_tokens(conversation_history)
@@ -178,59 +190,83 @@ class AgentOrchestrator:
 
             function_response_parts: list[types.Part] = []
 
-            for fc_part in function_call_parts:
-                fc = fc_part.function_call
-                tool_name = fc.name
-                tool_args = dict(fc.args) if fc.args else {}
+            try:
+                for fc_part in function_call_parts:
+                    fc = fc_part.function_call
+                    tool_name = fc.name
+                    tool_args = dict(fc.args) if fc.args else {}
 
-                start_ts = time.perf_counter()
-                result = await executor.execute(tool_name, tool_args)
-                duration_ms = round((time.perf_counter() - start_ts) * 1000)
+                    # Log tool call with key args (truncate large values)
+                    args_summary = {
+                        k: (str(v)[:60] + "..." if len(str(v)) > 60 else v)
+                        for k, v in tool_args.items()
+                        if k != "rows"  # skip bulky row data
+                    }
+                    if "rows" in tool_args:
+                        args_summary["rows"] = f"[{len(tool_args['rows'])} rows]"
+                    logger.info(f"  tool[{iteration}] → {tool_name}({args_summary})")
 
-                step = ToolStep(
-                    tool=tool_name,
-                    args=tool_args,
-                    result_summary=result.summary,
-                    duration_ms=duration_ms,
-                    success=result.success,
-                    error=result.error,
-                )
-                timeline.append(step)
+                    start_ts = time.perf_counter()
+                    result = await executor.execute(tool_name, tool_args)
+                    duration_ms = round((time.perf_counter() - start_ts) * 1000)
 
-                # Stream tool step to frontend immediately
-                await _safe_send(websocket, {"type": "tool_call", "step": step.model_dump()})
-
-                # Push incremental workbook updates for mutating tools
-                if tool_name in {
-                    "create_sheet", "insert_data", "add_formula",
-                    "edit_cell", "apply_formatting", "sort_range",
-                    "create_model_scaffold",
-                }:
-                    wb_state = serialize_workbook(workbook.wb, workbook._charts)
-                    await _safe_send(websocket, {"type": "workbook_update", "state": wb_state})
-                    for sheet_name in workbook.get_all_sheet_names():
-                        await _safe_send(websocket, {
-                            "type": "new_tab",
-                            "tab": {"id": sheet_name, "name": sheet_name, "type": "sheet"},
-                        })
-
-                # Trim tool response before adding to contents — reduces tokens sent to Gemini
-                # Read tools (get_sheet_state, parse_document) are passed through untouched
-                trimmed_response = _trim_tool_response(tool_name, result.data, result.summary)
-                function_response_parts.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response=trimmed_response,
+                    status = "✓" if result.success else "✗"
+                    logger.info(
+                        f"  tool[{iteration}] ← {tool_name} {status} ({duration_ms}ms) "
+                        f"{result.summary[:100]}"
                     )
+
+                    step = ToolStep(
+                        tool=tool_name,
+                        args=tool_args,
+                        result_summary=result.summary,
+                        duration_ms=duration_ms,
+                        success=result.success,
+                        error=result.error,
+                    )
+                    timeline.append(step)
+
+                    # Stream tool step to frontend immediately
+                    await _safe_send(websocket, {"type": "tool_call", "step": step.model_dump()})
+
+                    # Push incremental workbook updates for mutating tools
+                    if tool_name in {
+                        "create_sheet", "insert_data", "add_formula",
+                        "edit_cell", "apply_formatting", "sort_range",
+                        "create_model_scaffold", "clean_data",
+                    }:
+                        wb_state = serialize_workbook(workbook.wb, workbook._charts)
+                        await _safe_send(websocket, {"type": "workbook_update", "state": wb_state})
+                        for sheet_name in workbook.get_all_sheet_names():
+                            await _safe_send(websocket, {
+                                "type": "new_tab",
+                                "tab": {"id": sheet_name, "name": sheet_name, "type": "sheet"},
+                            })
+
+                    # Trim tool response before adding to contents — reduces tokens sent to Gemini
+                    # Read tools (get_sheet_state, parse_document) are passed through untouched
+                    trimmed_response = _trim_tool_response(tool_name, result.data, result.summary)
+                    function_response_parts.append(
+                        types.Part.from_function_response(
+                            name=tool_name,
+                            response=trimmed_response,
+                        )
+                    )
+
+                # Feed all responses back in one Content
+                contents.append(
+                    types.Content(role="user", parts=function_response_parts)
                 )
 
-            # Feed all responses back in one Content
-            contents.append(
-                types.Content(role="user", parts=function_response_parts)
-            )
+            except Exception as tool_exc:
+                # Preserve all history built so far before re-raising so the model
+                # retains context of completed actions on the next user message.
+                _flush_history_from_contents()
+                raise tool_exc
 
         # ── Hit iteration cap ─────────────────────────────────────────────────
         logger.warning(f"Agent hit MAX_TOOL_ITERATIONS={MAX_TOOL_ITERATIONS}")
+        _flush_history_from_contents()
         await _safe_send(websocket, {
             "type": "error",
             "message": (
@@ -249,14 +285,31 @@ class AgentOrchestrator:
     ) -> types.GenerateContentResponse:
         """Call Gemini with exponential backoff on rate limit errors."""
         delay = RATE_LIMIT_DELAY_BASE
+        n_turns = len(contents)
 
         for attempt in range(max_retries):
             try:
-                return await self.client.aio.models.generate_content(
+                t0 = time.perf_counter()
+                result = await self.client.aio.models.generate_content(
                     model=GEMINI_MODEL,
                     contents=contents,
                     config=self._make_config(system_prompt=system_prompt),
                 )
+                elapsed = round((time.perf_counter() - t0) * 1000)
+                # Log response metadata
+                cand = result.candidates[0] if result.candidates else None
+                n_parts = len(cand.content.parts) if cand and cand.content else 0
+                has_fc = any(
+                    hasattr(p, "function_call") and p.function_call
+                    for p in (cand.content.parts if cand and cand.content else [])
+                )
+                logger.info(
+                    f"  gemini ← {elapsed}ms  "
+                    f"turns={n_turns}  parts={n_parts}  "
+                    f"has_tool_calls={has_fc}  "
+                    f"finish={cand.finish_reason if cand else 'none'}"
+                )
+                return result
             except Exception as exc:
                 err = str(exc).lower()
                 is_rate_limit = any(k in err for k in (
@@ -268,11 +321,12 @@ class AgentOrchestrator:
                     jitter = (time.time() % 1)
                     sleep_for = min(delay * (2 ** attempt) + jitter, MAX_BACKOFF_SECONDS)
                     logger.warning(
-                        f"Rate limit hit (attempt {attempt + 1}/{max_retries}), "
-                        f"sleeping {sleep_for:.1f}s"
+                        f"  gemini rate-limit (attempt {attempt + 1}/{max_retries}), "
+                        f"retry in {sleep_for:.1f}s — {str(exc)[:120]}"
                     )
                     await asyncio.sleep(sleep_for)
                 else:
+                    logger.error(f"  gemini FATAL error: {str(exc)[:200]}")
                     raise
 
         raise RuntimeError("Exceeded retry attempts")  # unreachable

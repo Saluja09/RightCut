@@ -11,18 +11,27 @@ function loadPersistedState() {
   try {
     const raw = localStorage.getItem(PERSIST_KEY)
     if (!raw) return {}
-    const { workbookState, tabs, activeTab, activeSheet } = JSON.parse(raw)
-    // Don't restore messages — avoids duplicate key issues and stale pending states
+    const { workbookState, tabs, activeTab, activeSheet, sessionRole } = JSON.parse(raw)
     const wb = workbookState || null
+    const role = sessionRole || (wb ? 'general' : null)
+
+    // If workbook exists but tabs are missing/empty, rebuild from sheets
+    let resolvedTabs = tabs || []
+    let resolvedActiveTab = activeTab || null
+    let resolvedActiveSheet = activeSheet || null
+    if (wb && resolvedTabs.length === 0 && wb.sheets?.length > 0) {
+      resolvedTabs = wb.sheets.map((s) => ({ id: s.name, name: s.name, type: 'sheet' }))
+      resolvedActiveSheet = resolvedActiveSheet || wb.active_sheet || wb.sheets[0]?.name || null
+      resolvedActiveTab = resolvedActiveSheet
+    }
+
     return {
       workbookState: wb,
-      tabs: tabs || [],
-      activeTab: activeTab || null,
-      activeSheet: activeSheet || null,
-      // If we have a saved workbook, mark it for backend restore on next WS connect
+      tabs: resolvedTabs,
+      activeTab: resolvedActiveTab,
+      activeSheet: resolvedActiveSheet,
       pendingRestore: wb ? { workbook_state: wb, messages: [] } : null,
-      // Existing sessions (have workbook) skip the role modal; fresh sessions show it
-      sessionRole: wb ? 'finance' : null,
+      sessionRole: role,
     }
   } catch (_) {
     return {}
@@ -31,8 +40,8 @@ function loadPersistedState() {
 
 function persistState(state) {
   try {
-    const { workbookState, tabs, activeTab, activeSheet } = state
-    localStorage.setItem(PERSIST_KEY, JSON.stringify({ workbookState, tabs, activeTab, activeSheet }))
+    const { workbookState, tabs, activeTab, activeSheet, sessionRole } = state
+    localStorage.setItem(PERSIST_KEY, JSON.stringify({ workbookState, tabs, activeTab, activeSheet, sessionRole }))
   } catch (_) {}
 }
 
@@ -53,7 +62,17 @@ const useWorkspaceStore = create((set, get) => ({
   // message shape: { id, role: 'user'|'agent'|'error', text, timestamp, timeline? }
   messages: [],
   addMessage: (msg) =>
-    set((s) => ({ messages: [...s.messages, { id: msg.id || crypto.randomUUID(), ...msg }] })),
+    set((s) => {
+      const id = msg.id || crypto.randomUUID()
+      // Deduplicate: if a message with this id already exists, replace it (handles WS retries)
+      const exists = s.messages.findIndex((m) => m.id === id)
+      if (exists >= 0) {
+        const updated = [...s.messages]
+        updated[exists] = { ...updated[exists], ...msg, id }
+        return { messages: updated }
+      }
+      return { messages: [...s.messages, { ...msg, id }] }
+    }),
 
   // Update an existing message by id (e.g. append streaming text)
   updateMessage: (id, patch) =>
@@ -81,13 +100,43 @@ const useWorkspaceStore = create((set, get) => ({
   workbookState: null,
   setWorkbookState: (state) => {
     const activeSheet = state.active_sheet || state.sheets?.[0]?.name || null
-    set({ workbookState: state, activeSheet })
 
-    // Auto-register sheet tabs
-    const { addTab } = get()
+    // Build the complete tab list from the incoming workbook state.
+    // This replaces stale tabs from previous sessions — only tabs matching
+    // current sheets/charts survive.
+    const newTabs = []
     for (const sheet of state.sheets || []) {
-      addTab({ id: sheet.name, name: sheet.name, type: 'sheet' })
+      newTabs.push({ id: sheet.name, name: sheet.name, type: 'sheet' })
+      for (let i = 0; i < (sheet.charts || []).length; i++) {
+        const chart = sheet.charts[i]
+        const chartId = `chart__${sheet.name}__${i}`
+        newTabs.push({
+          id: chartId,
+          name: chart.title || `${sheet.name} Chart`,
+          type: 'chart',
+          sheetName: sheet.name,
+          chartIndex: i,
+        })
+      }
     }
+
+    // Preserve any document tabs (they aren't in workbook state)
+    const { tabs: oldTabs } = get()
+    const docTabs = oldTabs.filter((t) => t.type === 'document')
+    const allTabs = [...newTabs, ...docTabs]
+
+    // Pick a valid active tab
+    const currentActive = get().activeTab
+    const validActive = allTabs.find((t) => t.id === currentActive)
+      ? currentActive
+      : (activeSheet || allTabs[0]?.id || null)
+
+    set({
+      workbookState: state,
+      activeSheet,
+      tabs: allTabs,
+      activeTab: validActive,
+    })
   },
 
   // ── Active sheet ──────────────────────────────────────────────────────────
@@ -148,7 +197,11 @@ const useWorkspaceStore = create((set, get) => ({
     set((s) => ({ sheetCount: s.workbookState?.sheets?.length || 0 })),
 }))
 
-// Persist relevant state to localStorage on every change
-useWorkspaceStore.subscribe((state) => persistState(state))
+// Persist relevant state to localStorage — debounced to avoid writes on every keystroke/scroll
+let _persistTimer = null
+useWorkspaceStore.subscribe((state) => {
+  clearTimeout(_persistTimer)
+  _persistTimer = setTimeout(() => persistState(state), 300)
+})
 
 export default useWorkspaceStore

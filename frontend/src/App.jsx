@@ -14,6 +14,7 @@ import useAuthStore from './stores/authStore'
 import useThemeStore from './stores/themeStore'
 import useHistoryStore from './stores/historyStore'
 import { useWebSocket } from './hooks/useWebSocket'
+import { apiUrl } from './utils/api'
 
 // Initialize session synchronously so sessionId exists before any hook runs
 const store = useWorkspaceStore.getState()
@@ -28,39 +29,56 @@ export default function App() {
   const setSessionRole = useWorkspaceStore((s) => s.setSessionRole)
   const { user, isGuest, loading: authLoading, initAuth } = useAuthStore()
   const { initTheme } = useThemeStore()
-  const { upsertSession, saveMessage, loadSessions, saveWorkbook, loadWorkbook } = useHistoryStore()
+  const { upsertSession, saveAllMessages, loadSessions, saveWorkbook, loadWorkbook } = useHistoryStore()
 
   // Single WebSocket for the entire app
   const { sendMessage, sendCellEdit } = useWebSocket()
 
-  // Init auth + theme on mount
+  // Init auth + theme on mount, and reload messages for the current active session
   useEffect(() => {
     initAuth()
     initTheme()
+    // Restore messages for the current session on page load
+    // (workspaceStore persists workbookState but not messages)
+    if (sessionId) {
+      const hs = useHistoryStore.getState()
+      hs.loadMessages(sessionId, undefined).then((msgs) => {
+        if (msgs.length > 0 && useWorkspaceStore.getState().messages.length === 0) {
+          useWorkspaceStore.setState({ messages: msgs })
+        }
+      })
+      // Also ensure the current session's workbook is saved to per-session key
+      // so that switching away and back restores it correctly
+      const wb = useWorkspaceStore.getState().workbookState
+      if (wb) {
+        hs.saveWorkbook(sessionId, undefined, wb)
+      }
+    }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // If messages load into a session that has no role set, default to finance
+  // If messages load into a session that has no role set, default to general
   // (covers restored sessions where the modal would incorrectly appear)
   useEffect(() => {
     if (sessionRole === null && messages.length > 0) {
-      setSessionRole('finance')
+      setSessionRole('general')
     }
   }, [messages.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Persist session to history whenever messages change
+  // Persist session title and save ALL unsaved messages whenever messages change
   useEffect(() => {
     if (!sessionId || messages.length === 0) return
     const userId = user?.id
+
+    // Title: derived from first user message
     const firstUser = messages.find((m) => m.role === 'user')
-    const title = firstUser
-      ? firstUser.text.slice(0, 60) + (firstUser.text.length > 60 ? '…' : '')
-      : 'Session ' + sessionId.slice(0, 8)
-    upsertSession(sessionId, userId, title)
-    const last = messages[messages.length - 1]
-    if (last && (last.role === 'user' || last.role === 'agent')) {
-      saveMessage(sessionId, userId, last)
+    if (firstUser) {
+      const title = firstUser.text.slice(0, 60) + (firstUser.text.length > 60 ? '…' : '')
+      upsertSession(sessionId, userId, title)
     }
-  }, [messages]) // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Batch-save all user/agent messages — deduplicates by id
+    saveAllMessages(sessionId, userId, messages)
+  }, [messages.length, sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reload sessions when user changes
   useEffect(() => {
@@ -93,6 +111,14 @@ export default function App() {
   }
 
   const handleSelectSession = async (newSessionId) => {
+    // Save the current session's workbook before switching so it can be restored later
+    const cur = useWorkspaceStore.getState()
+    if (cur.sessionId && cur.workbookState) {
+      try {
+        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify(cur.workbookState))
+      } catch (_) {}
+    }
+
     localStorage.setItem('rightcut_session_id', newSessionId)
     const { loadMessages, loadWorkbook } = useHistoryStore.getState()
     const [msgs, wb] = await Promise.all([
@@ -117,19 +143,20 @@ export default function App() {
       activeSheet,
       // Mark that this session needs backend restoration (WS onopen will pick this up)
       pendingRestore: wb ? { workbook_state: wb, messages: msgs } : null,
-      // Existing sessions skip the role modal — treat as finance (default)
-      sessionRole: msgs.length > 0 ? 'finance' : null,
+      // Existing sessions skip the role modal — default to general
+      sessionRole: msgs.length > 0 ? 'general' : null,
     })
 
     // Also eagerly call restore so backend is ready before the next user message
     if (wb) {
       try {
-        await fetch(`/restore/${newSessionId}`, {
+        await fetch(apiUrl(`/restore/${newSessionId}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             workbook_state: wb,
             messages: msgs.map((m) => ({ role: m.role, text: m.text, timestamp: m.timestamp })),
+            role: useWorkspaceStore.getState().sessionRole || 'general',
           }),
         })
       } catch (e) {

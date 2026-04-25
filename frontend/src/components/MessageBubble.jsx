@@ -157,19 +157,19 @@ function MarkdownText({ text }) {
 function parseInline(text) {
   const segments = []
   const regex = /(\*\*[^*]+\*\*|`[^`]+`)/g
-  let last = 0, match
+  let last = 0, match, idx = 0
 
   while ((match = regex.exec(text)) !== null) {
-    if (match.index > last) segments.push(<span key={last}>{text.slice(last, match.index)}</span>)
+    if (match.index > last) segments.push(<span key={idx++}>{text.slice(last, match.index)}</span>)
     const raw = match[0]
     if (raw.startsWith('**')) {
-      segments.push(<strong key={match.index}>{raw.slice(2, -2)}</strong>)
+      segments.push(<strong key={idx++}>{raw.slice(2, -2)}</strong>)
     } else {
-      segments.push(<code key={match.index} className="inline-code">{raw.slice(1, -1)}</code>)
+      segments.push(<code key={idx++} className="inline-code">{raw.slice(1, -1)}</code>)
     }
     last = match.index + raw.length
   }
-  if (last < text.length) segments.push(<span key={last}>{text.slice(last)}</span>)
+  if (last < text.length) segments.push(<span key={idx++}>{text.slice(last)}</span>)
   return segments.length ? segments : [<span key={0}>{text}</span>]
 }
 

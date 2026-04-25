@@ -4,13 +4,24 @@
  */
 import { useMemo, useCallback, useState } from 'react'
 import { AgGridReact } from 'ag-grid-react'
-import { ModuleRegistry, ClientSideRowModelModule, CellStyleModule } from 'ag-grid-community'
+import {
+  ModuleRegistry,
+  ClientSideRowModelModule,
+  CellStyleModule,
+  TextEditorModule,
+  RowSelectionModule,
+} from 'ag-grid-community'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-alpine.css'
 import { BarChart2, Table2 } from 'lucide-react'
 import { sheetStateToAgGrid, fieldRowToCell, columnIndexToLetter } from '../utils/sheetSync'
 
-ModuleRegistry.registerModules([ClientSideRowModelModule, CellStyleModule])
+ModuleRegistry.registerModules([
+  ClientSideRowModelModule,
+  CellStyleModule,
+  TextEditorModule,
+  RowSelectionModule,
+])
 
 export default function SpreadsheetView({ sheet, allSheets, onCellEdit }) {
   const [selectedCell, setSelectedCell] = useState(null)  // { col, row, value, colLetter }
@@ -116,15 +127,13 @@ export default function SpreadsheetView({ sheet, allSheets, onCellEdit }) {
           onCellFocused={onCellFocused}
           suppressMovableColumns
           enableCellTextSelection
-          suppressRowClickSelection
-          rowSelection="single"
         />
       </div>
 
       {sheet.charts?.length > 0 && (
         <div className="chart-placeholders">
           {sheet.charts.map((chart, i) => (
-            <div key={i} className="chart-placeholder">
+            <div key={chart.title || `chart_${i}`} className="chart-placeholder">
               <BarChart2 size={13} />
               <span className="chart-title">{chart.title || chart.chart_type} chart</span>
               <span className="chart-note">Visible in downloaded .xlsx</span>

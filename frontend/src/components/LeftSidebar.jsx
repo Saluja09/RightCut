@@ -4,9 +4,9 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  SquarePen, FolderOpen, LayoutTemplate, Archive, Star,
+  SquarePen, FolderOpen, LayoutTemplate, Archive,
   ChevronDown, ChevronRight, Sun, Moon, LogOut,
-  Sheet, FileText, BarChart3
+  LayoutGrid, FileText, BarChart3, Trash2
 } from 'lucide-react'
 import useHistoryStore from '../stores/historyStore'
 import useAuthStore from '../stores/authStore'
@@ -27,17 +27,42 @@ function formatDate(iso) {
 export default function LeftSidebar({ onSelectSession }) {
   const { user, isGuest, signOut } = useAuthStore()
   const { theme, toggleTheme } = useThemeStore()
-  const { sessions, loadSessions } = useHistoryStore()
+  const { sessions, loadSessions, deleteSession } = useHistoryStore()
   const currentSessionId = useWorkspaceStore((s) => s.sessionId)
   const tabs = useWorkspaceStore((s) => s.tabs)
   const setActiveTab = useWorkspaceStore((s) => s.setActiveTab)
   const [expandedSession, setExpandedSession] = useState(null)
+  const [deletingId, setDeletingId] = useState(null)
 
   useEffect(() => {
     loadSessions(user?.id)
   }, [user?.id]) // eslint-disable-line
 
+  const handleDeleteSession = async (e, sessionId) => {
+    e.stopPropagation()
+    if (!window.confirm('Delete this session? This cannot be undone.')) return
+    setDeletingId(sessionId)
+    await deleteSession(sessionId, user?.id)
+    setDeletingId(null)
+    // If we deleted the active session, start a new one
+    if (sessionId === currentSessionId) {
+      const newId = crypto.randomUUID()
+      localStorage.setItem('rightcut_session_id', newId)
+      useWorkspaceStore.setState({
+        sessionId: newId, messages: [], workbookState: null,
+        tabs: [], activeTab: null, activeSheet: null, sessionRole: null,
+      })
+    }
+  }
+
   const handleNewSession = () => {
+    // Save current session's workbook before clearing, so it can be restored later
+    const cur = useWorkspaceStore.getState()
+    if (cur.sessionId && cur.workbookState) {
+      try {
+        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify(cur.workbookState))
+      } catch (_) {}
+    }
     const newId = crypto.randomUUID()
     localStorage.setItem('rightcut_session_id', newId)
     useWorkspaceStore.setState({
@@ -107,26 +132,44 @@ export default function LeftSidebar({ onSelectSession }) {
           const sessionTabs = getSessionTabs(session.session_id)
           const isExpanded = expandedSession === session.session_id || isActive
 
+          const handleSessionClick = () => {
+            if (!isActive) {
+              // Switch to session — expand happens naturally via isActive becoming true
+              onSelectSession(session.session_id)
+              setExpandedSession(session.session_id)
+            } else {
+              // Already active — just toggle sheet list expand
+              setExpandedSession(isExpanded ? null : session.session_id)
+            }
+          }
+
           return (
-            <div key={session.id || session.session_id} className="sidebar-session-group">
-              <button
-                className={`sidebar-session-item ${isActive ? 'sidebar-session-item--active' : ''}`}
-                onClick={() => {
-                  if (!isActive) onSelectSession(session.session_id)
-                  setExpandedSession(isExpanded ? null : session.session_id)
-                }}
-              >
-                <span className="sidebar-session-chevron">
-                  {isExpanded && sessionTabs.length > 0
-                    ? <ChevronDown size={11} />
-                    : <ChevronRight size={11} />
-                  }
-                </span>
-                <span className="sidebar-session-title">
-                  {session.title || 'Untitled'}
-                </span>
-                {isActive && <span className="sidebar-session-dot" />}
-              </button>
+            <div key={session.session_id} className="sidebar-session-group">
+              <div className="sidebar-session-row">
+                <button
+                  className={`sidebar-session-item ${isActive ? 'sidebar-session-item--active' : ''}`}
+                  onClick={handleSessionClick}
+                >
+                  <span className="sidebar-session-chevron">
+                    {isExpanded && sessionTabs.length > 0
+                      ? <ChevronDown size={11} />
+                      : <ChevronRight size={11} />
+                    }
+                  </span>
+                  <span className="sidebar-session-title">
+                    {session.title || 'Untitled'}
+                  </span>
+                  {isActive && <span className="sidebar-session-dot" />}
+                </button>
+                <button
+                  className="sidebar-session-delete"
+                  onClick={(e) => handleDeleteSession(e, session.session_id)}
+                  disabled={deletingId === session.session_id}
+                  title="Delete session"
+                >
+                  <Trash2 size={11} />
+                </button>
+              </div>
 
               {/* Sheet sub-items */}
               {isExpanded && sessionTabs.length > 0 && (
@@ -138,7 +181,7 @@ export default function LeftSidebar({ onSelectSession }) {
                       onClick={() => setActiveTab(tab.id)}
                     >
                       {tab.type === 'sheet'
-                        ? <Sheet size={11} />
+                        ? <LayoutGrid size={11} />
                         : <FileText size={11} />
                       }
                       <span>{tab.name}</span>

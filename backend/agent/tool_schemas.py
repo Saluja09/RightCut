@@ -284,6 +284,53 @@ CREATE_MODEL_SCAFFOLD = types.FunctionDeclaration(
     ),
 )
 
+CLEAN_DATA = types.FunctionDeclaration(
+    name="clean_data",
+    description=(
+        "Apply a data-cleaning operation to a sheet. "
+        "Use this to fix messy data: trim whitespace, remove duplicates, remove blank rows, "
+        "change case, find & replace, convert text to numbers or dates, split columns, fill down, "
+        "extract numbers from text, fix number formatting, or remove special characters. "
+        "Always call get_sheet_state first to understand the data structure."
+    ),
+    parameters=_obj(
+        "clean_data parameters",
+        props={
+            "sheet_name": _str("Target sheet name"),
+            "operation": types.Schema(
+                type=types.Type.STRING,
+                description="The cleaning operation to apply",
+                enum=[
+                    "trim_whitespace",       # Remove extra whitespace from text cells
+                    "remove_duplicates",     # Delete exact duplicate rows
+                    "remove_blank_rows",     # Delete rows where the target column (or all columns) is empty
+                    "to_uppercase",          # Convert text to UPPERCASE
+                    "to_lowercase",          # Convert text to lowercase
+                    "to_titlecase",          # Convert text to Title Case
+                    "find_replace",          # Find and replace text (requires find_text)
+                    "convert_to_number",     # Strip $, commas, % and convert to numeric
+                    "convert_to_date",       # Parse text as dates (requires dateutil)
+                    "remove_special_chars",  # Remove non-alphanumeric characters
+                    "fill_down",             # Fill blank cells with the value above (requires column)
+                    "extract_numbers",       # Extract first number from mixed text (requires column)
+                    "split_column",          # Split column on delimiter into two columns (requires column)
+                    "fix_number_format",     # Parse and reformat numbers with consistent Excel number_format
+                    "standardize_text",      # Normalize unicode, collapse whitespace
+                ],
+            ),
+            "column": _str(
+                "Optional: column header name (e.g. 'Name') or letter (e.g. 'B') to target. "
+                "If omitted, the operation applies to all text columns."
+            ),
+            "find_text": _str("Text to find (required for find_replace operation)"),
+            "replace_text": _str("Replacement text (used by find_replace; defaults to empty string)"),
+            "delimiter": _str("Delimiter for split_column (defaults to space)"),
+            "new_column_name": _str("Header name for the new column created by split_column"),
+        },
+        required=["sheet_name", "operation"],
+    ),
+)
+
 VALIDATE_WORKBOOK = types.FunctionDeclaration(
     name="validate_workbook",
     description=(
@@ -316,6 +363,15 @@ GET_SHEET_STATE = types.FunctionDeclaration(
     ),
 )
 
+GET_ALL_SHEET_NAMES = types.FunctionDeclaration(
+    name="get_all_sheet_names",
+    description=(
+        "List all sheet names currently in the workbook. "
+        "Use this when you need to know what sheets exist before deciding which to edit or clean."
+    ),
+    parameters=_obj("get_all_sheet_names parameters"),
+)
+
 # ── Combined tool object passed to Gemini ─────────────────────────────────────
 
 RIGHTCUT_TOOL = types.Tool(
@@ -330,7 +386,9 @@ RIGHTCUT_TOOL = types.Tool(
         ADD_CITATION,
         SORT_RANGE,
         CREATE_CHART,
+        CLEAN_DATA,
         VALIDATE_WORKBOOK,
         GET_SHEET_STATE,
+        GET_ALL_SHEET_NAMES,
     ]
 )

@@ -25,6 +25,12 @@ export default function HistoryDrawer({ onClose, onSelectSession }) {
   }, [user?.id]) // eslint-disable-line
 
   const handleNewSession = () => {
+    const cur = useWorkspaceStore.getState()
+    if (cur.sessionId && cur.workbookState) {
+      try {
+        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify(cur.workbookState))
+      } catch (_) {}
+    }
     const newId = crypto.randomUUID()
     localStorage.setItem('rightcut_session_id', newId)
     useWorkspaceStore.setState({

@@ -2,6 +2,7 @@
  * RightCut — Document preview tab.
  * Shows extracted text and tables from an uploaded document.
  */
+import { FileText } from 'lucide-react'
 import useWorkspaceStore from '../stores/workspaceStore'
 
 export default function DocumentView({ fileId }) {
@@ -19,7 +20,7 @@ export default function DocumentView({ fileId }) {
   return (
     <div className="doc-view">
       <div className="doc-header">
-        <span className="doc-icon">📄</span>
+        <span className="doc-icon"><FileText size={16} /></span>
         <div className="doc-meta">
           <span className="doc-filename">{doc.filename}</span>
           {doc.page_count && (

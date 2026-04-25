@@ -1,9 +1,10 @@
-import { Sheet, FileText } from 'lucide-react'
+import { LayoutGrid, FileText, BarChart2 } from 'lucide-react'
 import useWorkspaceStore from '../stores/workspaceStore'
 
 function TabIcon({ type }) {
   if (type === 'document') return <FileText size={11} />
-  return <Sheet size={11} />
+  if (type === 'chart')    return <BarChart2 size={11} />
+  return <LayoutGrid size={11} />
 }
 
 export default function TabBar() {

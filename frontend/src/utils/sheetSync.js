@@ -85,9 +85,8 @@ export function sheetStateToAgGrid(sheet, allSheets) {
     } else {
       hf = HyperFormula.buildFromArray(hfData, { licenseKey: 'gpl-v3' })
     }
-    const sheetIdx = (allSheets && allSheets.length > 1)
-      ? hf.getSheetId(sheet.name) ?? 0
-      : 0
+    const rawSheetId = (allSheets && allSheets.length > 1) ? hf.getSheetId(sheet.name) : undefined
+    const sheetIdx = (rawSheetId != null && rawSheetId !== undefined) ? rawSheetId : 0
     let errorCount = 0
     let formulaCount = 0
     // Only evaluate data rows (skip header at index 0); map back to rows[] indices

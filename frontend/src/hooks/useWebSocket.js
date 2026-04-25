@@ -9,6 +9,8 @@ import useWorkspaceStore from '../stores/workspaceStore'
 const RECONNECT_BASE_MS = 1500
 const MAX_RECONNECT_ATTEMPTS = 10
 
+import { apiUrl, wsUrl } from '../utils/api'
+
 export function useWebSocket() {
   const sessionId = useWorkspaceStore((s) => s.sessionId)
   const wsRef = useRef(null)
@@ -31,7 +33,7 @@ export function useWebSocket() {
           // If the backend session is empty but we have a saved snapshot, restore it
           if (!msg.has_workbook && s.pendingRestore) {
             const { sessionId: sid, pendingRestore } = s
-            fetch(`/restore/${sid}`, {
+            fetch(apiUrl(`/restore/${sid}`), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -41,6 +43,7 @@ export function useWebSocket() {
                   text: m.text,
                   timestamp: m.timestamp,
                 })),
+                role: s.sessionRole || 'general',
               }),
             }).catch((e) => console.warn('WS-triggered restore failed:', e))
           }
@@ -57,10 +60,17 @@ export function useWebSocket() {
           break
         case 'agent_response': {
           const id = s.pendingMessageId || crypto.randomUUID()
-          // Attach sheet references from current workbook so user can reopen them
+          // Only attach sheetRefs if the timeline includes a sheet-creating/writing tool call
+          // so the "CREATED" card only appears when a model was actually built this turn.
+          const MUTATING_TOOLS = new Set([
+            'create_sheet', 'insert_data', 'add_formula', 'edit_cell',
+            'apply_formatting', 'sort_range', 'create_model_scaffold', 'clean_data',
+          ])
+          const timeline = msg.timeline || []
+          const builtModel = timeline.some((t) => MUTATING_TOOLS.has(t.tool))
           const sheets = s.workbookState?.sheets || []
-          const sheetRefs = sheets.map((sh) => ({ name: sh.name }))
-          s.addMessage({ id, role: 'agent', text: msg.text, timeline: msg.timeline || [], sheetRefs, timestamp: Date.now() })
+          const sheetRefs = builtModel ? sheets.map((sh) => ({ name: sh.name })) : []
+          s.addMessage({ id, role: 'agent', text: msg.text, timeline, sheetRefs, timestamp: Date.now() })
           // Remove the pending placeholder
           s.setPendingMessageId(null)
           s.setWsStatus('connected')
@@ -110,7 +120,7 @@ export function useWebSocket() {
         wsRef.current.close()
       }
 
-      const ws = new WebSocket(`ws://localhost:8000/ws/${sessionId}`)
+      const ws = new WebSocket(wsUrl(sessionId))
       wsRef.current = ws
       useWorkspaceStore.getState().setWsStatus('connecting')
 

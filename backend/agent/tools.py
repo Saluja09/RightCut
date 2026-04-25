@@ -238,6 +238,37 @@ class ToolExecutor:
             data=result,
         )
 
+    async def _clean_data(
+        self,
+        sheet_name: str,
+        operation: str,
+        column: str | None = None,
+        find_text: str | None = None,
+        replace_text: str | None = None,
+        delimiter: str | None = None,
+        new_column_name: str | None = None,
+    ) -> ToolResult:
+        result = self.engine.clean_data(
+            sheet_name=sheet_name,
+            operation=operation,
+            column=column,
+            find_text=find_text,
+            replace_text=replace_text,
+            delimiter=delimiter,
+            new_column_name=new_column_name,
+        )
+        if not result.get("success", True):
+            return ToolResult(
+                summary=f"Clean data failed: {result.get('error')}",
+                data=result,
+                success=False,
+            )
+        col_desc = f" on column '{column}'" if column else " on all columns"
+        return ToolResult(
+            summary=f"Applied '{operation}'{col_desc} in '{sheet_name}': {result.get('cells_changed', 0)} cell(s) changed",
+            data=result,
+        )
+
     async def _validate_workbook(self, check_hardcoded: bool = True) -> ToolResult:
         result = self.engine.validate_workbook(check_hardcoded)
         status = "PASS" if result.get("valid") else "WARNINGS"
@@ -253,4 +284,11 @@ class ToolExecutor:
         return ToolResult(
             summary=f"Read '{sheet_name}': {row_count} rows, columns: {', '.join(headers[:6])}{'...' if len(headers) > 6 else ''}",
             data=result,
+        )
+
+    async def _get_all_sheet_names(self) -> ToolResult:
+        names = self.engine.get_all_sheet_names()
+        return ToolResult(
+            summary=f"Workbook has {len(names)} sheet(s): {', '.join(names)}",
+            data={"sheet_names": names, "count": len(names)},
         )
