@@ -1,7 +1,5 @@
 # RightCut — AI Spreadsheet Agent for Private Markets
 
-> Take-home assignment for [Brightriver AI](https://www.brightriver.ai)
-
 RightCut is an AI-powered spreadsheet agent that builds, edits, and analyzes institutional-quality `.xlsx` workbooks through natural conversation. Upload deal documents, ask for analyses, and watch the agent construct formula-driven spreadsheets in real time — with a live preview, direct cell editing, and a transparent tool-call timeline for every action.
 
 ---
@@ -97,7 +95,7 @@ docker-compose up --build
 │    user edits sheet    │  • Document preview (uploaded file)  │
 │                        │                                      │
 │  [📎][__input____ ][▶] │  Cells are directly editable.        │
-│                        │  Edits sync back to agent context.   │
+│                        │  Edits sync back to agent context.  │
 ├────────────────────────┴─────────────────────────────────────┤
 │  ● Live · 3 sheets · 12 formulas · All formulas OK           │
 └──────────────────────────────────────────────────────────────┘

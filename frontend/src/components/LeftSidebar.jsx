@@ -66,7 +66,7 @@ export default function LeftSidebar({ onSelectSession }) {
       tabs: [],
       activeTab: null,
       activeSheet: null,
-      sessionRole: null,   // triggers role-select modal
+      sessionRole: 'general',
       pendingRestore: null,
       restoring: false,
       pendingMessageId: null,

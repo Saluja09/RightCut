@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Send, Paperclip,
-  FileText, FileSpreadsheet, FileBarChart2, AtSign,
+  FileText, FileSpreadsheet, FileBarChart2,
   Building2, TrendingUp, Calculator, Download
 } from 'lucide-react'
 import MessageBubble from './MessageBubble'
@@ -21,8 +21,6 @@ function fileIcon(fileType) {
 
 export default function ChatPanel({ sessionId, onSendMessage }) {
   const [inputText, setInputText]       = useState('')
-  const [mentionQuery, setMentionQuery] = useState(null)  // null = closed, string = open
-  const [mentionIdx, setMentionIdx]     = useState(0)
   const [historyIdx, setHistoryIdx]     = useState(-1)   // -1 = not browsing history
   const [savedDraft, setSavedDraft]     = useState('')   // draft saved when entering history
   const messagesEndRef = useRef(null)
@@ -61,14 +59,6 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
     }
   }
 
-  // Filter docs for @ mention
-  const docList = Object.values(documents)
-  const filteredDocs = mentionQuery !== null
-    ? docList.filter((d) =>
-        d.filename.toLowerCase().includes((mentionQuery || '').toLowerCase())
-      )
-    : []
-
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -95,29 +85,6 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
   }, [inputText, isThinking, onSendMessage, pendingFileIds])
 
   const handleKeyDown = (e) => {
-    // Handle @ mention navigation first
-    if (mentionQuery !== null && filteredDocs.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        setMentionIdx((i) => (i + 1) % filteredDocs.length)
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setMentionIdx((i) => (i - 1 + filteredDocs.length) % filteredDocs.length)
-        return
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault()
-        insertMention(filteredDocs[mentionIdx])
-        return
-      }
-      if (e.key === 'Escape') {
-        setMentionQuery(null)
-        return
-      }
-    }
-
     // Message history navigation — only when cursor is at start of empty/single-line input
     if (e.key === 'ArrowUp' && userMessages.length > 0) {
       const ta = textareaRef.current
@@ -159,33 +126,6 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
       setHistoryIdx(-1)
       setSavedDraft('')
     }
-
-    // Detect @ trigger
-    const cursor = e.target.selectionStart
-    const textBeforeCursor = val.slice(0, cursor)
-    const atMatch = textBeforeCursor.match(/@(\w*)$/)
-    if (atMatch && docList.length > 0) {
-      setMentionQuery(atMatch[1])
-      setMentionIdx(0)
-    } else {
-      setMentionQuery(null)
-    }
-  }
-
-  const insertMention = (doc) => {
-    const ta = textareaRef.current
-    if (!ta) return
-    const cursor = ta.selectionStart
-    const before = inputText.slice(0, cursor)
-    const after  = inputText.slice(cursor)
-    // Replace the @query with @filename
-    const replaced = before.replace(/@(\w*)$/, `@${doc.filename} `)
-    setInputText(replaced + after)
-    setMentionQuery(null)
-    setTimeout(() => {
-      ta.focus()
-      ta.setSelectionRange(replaced.length, replaced.length)
-    }, 0)
   }
 
   const handleFileChange = async (e) => {
@@ -215,7 +155,7 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
         addTab({ id: data.file_id, name: data.filename, type: 'document' })
         useWorkspaceStore.getState().addMessage({
           id: crypto.randomUUID(), role: 'agent', timeline: [], timestamp: Date.now(),
-          text: `Uploaded **${data.filename}** (${data.file_type.toUpperCase()}${data.page_count ? `, ${data.page_count} pages` : ''}). Type \`@${data.filename}\` to reference it.`,
+          text: `Uploaded **${data.filename}** (${data.file_type.toUpperCase()}${data.page_count ? `, ${data.page_count} pages` : ''}). Send a message to analyze it.`,
         })
       } catch (err) {
         useWorkspaceStore.getState().addMessage({
@@ -256,26 +196,6 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
 
       {/* Input */}
       <div className="input-wrapper">
-        {/* @ mention dropdown */}
-        {mentionQuery !== null && filteredDocs.length > 0 && (
-          <div className="mention-dropdown" role="listbox">
-            <div className="mention-header">Documents</div>
-            {filteredDocs.map((doc, i) => (
-              <button
-                key={doc.file_id}
-                className={`mention-item ${i === mentionIdx ? 'selected' : ''}`}
-                onMouseDown={(e) => { e.preventDefault(); insertMention(doc) }}
-                role="option"
-                aria-selected={i === mentionIdx}
-              >
-                <span className="mention-item-icon">{fileIcon(doc.file_type)}</span>
-                <span className="mention-item-name">{doc.filename}</span>
-                <span className="mention-item-type">{doc.file_type?.toUpperCase()}</span>
-              </button>
-            ))}
-          </div>
-        )}
-
         <div className="input-row">
           <textarea
             ref={textareaRef}
@@ -285,7 +205,7 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
             onKeyDown={handleKeyDown}
             placeholder={
               isThinking ? 'Agent is working…'
-              : wsStatus === 'connected' ? 'Ask anything, or @ to mention a file'
+              : wsStatus === 'connected' ? 'Ask anything…'
               : 'Connecting…'
             }
             disabled={isThinking || wsStatus !== 'connected'}
@@ -301,19 +221,6 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
               aria-label="Attach file"
             >
               <Paperclip size={15} />
-            </button>
-            <button
-              className="input-icon-btn"
-              onClick={() => {
-                setInputText((t) => t + '@')
-                textareaRef.current?.focus()
-                setMentionQuery('')
-              }}
-              title="Mention a document"
-              disabled={isThinking || docList.length === 0}
-              aria-label="Mention document"
-            >
-              <AtSign size={15} />
             </button>
             <button
               className="send-btn"
@@ -338,7 +245,7 @@ export default function ChatPanel({ sessionId, onSendMessage }) {
           hidden
         />
         <div className="input-hint">
-          <span className="input-hint-text">@ to mention · ↑↓ history</span>
+          <span className="input-hint-text">↑↓ history</span>
           <div className="input-hint-right">
             {messages.length > 1 && (
               <div className="summary-dropdown">
@@ -382,7 +289,7 @@ function EmptyChat({ onPromptClick }) {
       </div>
       <div className="empty-chat-title">Start your analysis</div>
       <div className="empty-chat-text">
-        Ask RightCut to build a model, or upload a document and use @ to reference it.
+        Ask RightCut to build a model, or upload a document to analyze it.
       </div>
       <div className="empty-chat-prompts">
         {QUICK_PROMPTS.map(({ icon: Icon, text }) => (

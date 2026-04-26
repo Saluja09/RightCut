@@ -14,7 +14,6 @@ import PreviewPanel from './components/PreviewPanel'
 import StatusBar from './components/StatusBar'
 import LoginPage from './components/LoginPage'
 import LeftSidebar from './components/LeftSidebar'
-import RoleSelectModal from './components/RoleSelectModal'
 import useWorkspaceStore from './stores/workspaceStore'
 import useAuthStore from './stores/authStore'
 import useThemeStore from './stores/themeStore'
@@ -30,7 +29,6 @@ if (!store.sessionId) {
 export default function App() {
   const sessionId   = useWorkspaceStore((s) => s.sessionId)
   const messages    = useWorkspaceStore((s) => s.messages)
-  const sessionRole = useWorkspaceStore((s) => s.sessionRole)
   const setSessionRole = useWorkspaceStore((s) => s.setSessionRole)
   const { user, isGuest, loading: authLoading, initAuth } = useAuthStore()
   const { initTheme } = useThemeStore()
@@ -62,12 +60,12 @@ export default function App() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // If messages load into a session that has no role set, default to general
+  // Always set role — no more role selection modal
   useEffect(() => {
-    if (sessionRole === null && messages.length > 0) {
+    if (!useWorkspaceStore.getState().sessionRole) {
       setSessionRole('general')
     }
-  }, [messages.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist session title and save ALL unsaved messages whenever messages change
   useEffect(() => {
@@ -127,7 +125,7 @@ export default function App() {
       pendingRestore: null,
       restoring: false,
       pendingMessageId: null,
-      sessionRole: null,
+      sessionRole: 'general',
     })
 
     // ── 2. Load saved data (async) ──
@@ -143,24 +141,12 @@ export default function App() {
     useWorkspaceStore.setState({
       messages: msgs,
       pendingRestore: wb ? { workbook_state: wb, messages: msgs } : null,
-      sessionRole: msgs.length > 0 ? 'general' : null,
+      sessionRole: 'general',
     })
-  }
-
-  const showRoleModal = sessionRole === null && sessionId
-
-  const handleRoleConfirm = (role) => {
-    setSessionRole(role)
   }
 
   return (
     <div className="app-root">
-      {showRoleModal && (
-        <RoleSelectModal
-          sessionId={sessionId}
-          onConfirm={handleRoleConfirm}
-        />
-      )}
       <LeftSidebar onSelectSession={handleSelectSession} />
       <div className="app-right">
         <div className="app-main">
