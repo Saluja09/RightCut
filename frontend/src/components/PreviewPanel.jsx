@@ -19,11 +19,11 @@ export default function PreviewPanel({ sessionId, onCellEdit }) {
   const handleDownload = async () => {
     if (!sessionId) return
     try {
-      // Ensure the backend engine has the workbook before downloading.
-      // If the session was loaded from storage, the engine may be empty —
-      // restore it first from the workbook state we already have in the store.
+      // Always restore the workbook to the backend before downloading.
+      // The backend session may have expired (Render free tier spins down),
+      // so we push the current workbook state to ensure it's there.
       if (workbookState?.sheets?.length) {
-        await fetch(apiUrl(`/restore/${sessionId}`), {
+        const restoreRes = await fetch(apiUrl(`/restore/${sessionId}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -32,12 +32,19 @@ export default function PreviewPanel({ sessionId, onCellEdit }) {
             role: useWorkspaceStore.getState().sessionRole || 'general',
           }),
         })
+        if (!restoreRes.ok) {
+          alert('Could not prepare workbook for download. The server may be starting up — please try again in a few seconds.')
+          return
+        }
+      } else {
+        alert('No workbook to download yet.')
+        return
       }
 
       const res = await fetch(apiUrl(`/download/${sessionId}`))
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        alert(err.detail || 'Download failed. Please re-run your analysis to regenerate the workbook.')
+        alert(err.detail || 'Download failed.')
         return
       }
       const blob = await res.blob()
@@ -48,7 +55,7 @@ export default function PreviewPanel({ sessionId, onCellEdit }) {
       a.click()
       URL.revokeObjectURL(url)
     } catch {
-      alert('Download failed. Please re-run your analysis to regenerate the workbook.')
+      alert('Download failed. The server may be starting up — please try again in a few seconds.')
     }
   }
 

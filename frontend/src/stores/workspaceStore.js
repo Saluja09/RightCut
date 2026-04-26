@@ -1,24 +1,33 @@
 /**
  * RightCut — Zustand workspace store.
  * Single source of truth for all UI state.
+ *
+ * WORKBOOK DATA FLOW (unidirectional):
+ *   Backend → (WS workbook_update) → workspaceStore.workbookState → UI render
+ *   workspaceStore.workbookState → (subscriber) → historyStore.saveWorkbook (backup)
+ *   historyStore.loadWorkbook → POST /restore → Backend → (WS workbook_update) → store
+ *
+ * The frontend NEVER renders workbook data loaded directly from localStorage/Supabase.
+ * It only uses saved snapshots to restore the backend, then renders what the backend sends.
  */
 import { create } from 'zustand'
 
-// Keys to persist across reloads
-const PERSIST_KEY = 'rightcut_store'
-const MIGRATION_KEY = 'rightcut_migration_v1'
+// Persist only sessionRole across reloads (not workbook — backend is source of truth)
+const PERSIST_KEY = 'rightcut_store_v2'
 
-// One-time migration: clear potentially contaminated per-session workbook keys
-// from before the cross-session contamination fix.
+// Migration: clear old workbook persistence keys that caused cross-session contamination.
+// The old system stored workbook snapshots in localStorage and rendered them directly.
+// The new system only uses the backend as the source of truth.
+const MIGRATION_KEY = 'rightcut_migration_v2'
 if (!localStorage.getItem(MIGRATION_KEY)) {
   const keysToRemove = []
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key?.startsWith('rightcut_wb_')) keysToRemove.push(key)
+    if (key?.startsWith('rightcut_wb_') || key === 'rightcut_store' || key === 'rightcut_migration_v1') {
+      keysToRemove.push(key)
+    }
   }
   keysToRemove.forEach((k) => localStorage.removeItem(k))
-  // Also clear the global persisted state to remove stale workbooks
-  localStorage.removeItem(PERSIST_KEY)
   localStorage.setItem(MIGRATION_KEY, '1')
 }
 
@@ -27,36 +36,7 @@ function loadPersistedState() {
     const raw = localStorage.getItem(PERSIST_KEY)
     if (!raw) return {}
     const parsed = JSON.parse(raw)
-    const { workbookState, tabs, activeTab, activeSheet, sessionRole } = parsed
-
-    // Only restore workbook if it belongs to the current session
-    // (prevents cross-session contamination after session switches)
-    const currentSessionId = localStorage.getItem('rightcut_session_id')
-    const storedSessionId = parsed.sessionId
-    // If the persisted state includes a sessionId, it must match the current one.
-    // If it doesn't include one (old format), discard the workbook — we can't verify ownership.
-    const sessionMatch = storedSessionId ? storedSessionId === currentSessionId : false
-    const wb = (workbookState && sessionMatch) ? workbookState : null
-    const role = sessionRole || (wb ? 'general' : null)
-
-    // If workbook was discarded, also discard tabs/activeSheet to avoid stale UI
-    let resolvedTabs = wb ? (tabs || []) : []
-    let resolvedActiveTab = wb ? (activeTab || null) : null
-    let resolvedActiveSheet = wb ? (activeSheet || null) : null
-    if (wb && resolvedTabs.length === 0 && wb.sheets?.length > 0) {
-      resolvedTabs = wb.sheets.map((s) => ({ id: s.name, name: s.name, type: 'sheet' }))
-      resolvedActiveSheet = resolvedActiveSheet || wb.active_sheet || wb.sheets[0]?.name || null
-      resolvedActiveTab = resolvedActiveSheet
-    }
-
-    return {
-      workbookState: wb,
-      tabs: resolvedTabs,
-      activeTab: resolvedActiveTab,
-      activeSheet: resolvedActiveSheet,
-      pendingRestore: wb ? { workbook_state: wb, messages: [] } : null,
-      sessionRole: role,
-    }
+    return { sessionRole: parsed.sessionRole || null }
   } catch (_) {
     return {}
   }
@@ -64,8 +44,10 @@ function loadPersistedState() {
 
 function persistState(state) {
   try {
-    const { sessionId, workbookState, tabs, activeTab, activeSheet, sessionRole } = state
-    localStorage.setItem(PERSIST_KEY, JSON.stringify({ sessionId, workbookState, tabs, activeTab, activeSheet, sessionRole }))
+    localStorage.setItem(PERSIST_KEY, JSON.stringify({
+      sessionId: state.sessionId,
+      sessionRole: state.sessionRole,
+    }))
   } catch (_) {}
 }
 
@@ -74,7 +56,6 @@ const useWorkspaceStore = create((set, get) => ({
   // ── Session ──────────────────────────────────────────────────────────────
   sessionId: null,
   initSession: () => {
-    // Reuse existing session across reloads
     const existing = localStorage.getItem('rightcut_session_id')
     const id = existing || crypto.randomUUID()
     localStorage.setItem('rightcut_session_id', id)
@@ -83,12 +64,10 @@ const useWorkspaceStore = create((set, get) => ({
   },
 
   // ── Chat messages ─────────────────────────────────────────────────────────
-  // message shape: { id, role: 'user'|'agent'|'error', text, timestamp, timeline? }
   messages: [],
   addMessage: (msg) =>
     set((s) => {
       const id = msg.id || crypto.randomUUID()
-      // Deduplicate: if a message with this id already exists, replace it (handles WS retries)
       const exists = s.messages.findIndex((m) => m.id === id)
       if (exists >= 0) {
         const updated = [...s.messages]
@@ -98,14 +77,12 @@ const useWorkspaceStore = create((set, get) => ({
       return { messages: [...s.messages, { ...msg, id }] }
     }),
 
-  // Update an existing message by id (e.g. append streaming text)
   updateMessage: (id, patch) =>
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
     })),
 
   // ── Tool timeline ─────────────────────────────────────────────────────────
-  // Maps pendingMessageId → ToolStep[]
   toolTimelines: {},
   addToolStep: (messageId, step) =>
     set((s) => ({
@@ -115,21 +92,16 @@ const useWorkspaceStore = create((set, get) => ({
       },
     })),
 
-  // ── Pending agent message (accumulates tool steps before agent responds) ──
+  // ── Pending agent message ─────────────────────────────────────────────────
   pendingMessageId: null,
   setPendingMessageId: (id) => set({ pendingMessageId: id }),
 
-  // ── Workbook state ────────────────────────────────────────────────────────
-  // workbookState shape: { sheets: SheetState[], active_sheet: string }
+  // ── Workbook state (set ONLY from backend WS workbook_update) ─────────────
   workbookState: null,
   setWorkbookState: (state) => {
-    const sid = get().sessionId
-    console.debug(`[setWorkbookState] sessionId=${sid?.slice(0,8)} sheets=${(state.sheets||[]).map(s=>s.name).join(',')}`)
     const activeSheet = state.active_sheet || state.sheets?.[0]?.name || null
 
-    // Build the complete tab list from the incoming workbook state.
-    // This replaces stale tabs from previous sessions — only tabs matching
-    // current sheets/charts survive.
+    // Build tabs from incoming workbook state
     const newTabs = []
     for (const sheet of state.sheets || []) {
       newTabs.push({ id: sheet.name, name: sheet.name, type: 'sheet' })
@@ -146,12 +118,11 @@ const useWorkspaceStore = create((set, get) => ({
       }
     }
 
-    // Preserve any document tabs (they aren't in workbook state)
+    // Preserve document tabs
     const { tabs: oldTabs } = get()
     const docTabs = oldTabs.filter((t) => t.type === 'document')
     const allTabs = [...newTabs, ...docTabs]
 
-    // Pick a valid active tab
     const currentActive = get().activeTab
     const validActive = allTabs.find((t) => t.id === currentActive)
       ? currentActive
@@ -170,7 +141,6 @@ const useWorkspaceStore = create((set, get) => ({
   setActiveSheet: (name) => set({ activeSheet: name }),
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
-  // tab shape: { id, name, type: 'sheet'|'document' }
   tabs: [],
   activeTab: null,
   addTab: (tab) =>
@@ -179,7 +149,7 @@ const useWorkspaceStore = create((set, get) => ({
       activeTab: s.activeTab ?? tab.id,
     })),
   setActiveTab: (id) => {
-    const { tabs, workbookState } = get()
+    const { tabs } = get()
     const tab = tabs.find((t) => t.id === id)
     set({ activeTab: id })
     if (tab?.type === 'sheet') {
@@ -188,37 +158,36 @@ const useWorkspaceStore = create((set, get) => ({
   },
 
   // ── Uploaded documents ────────────────────────────────────────────────────
-  // documents shape: { [file_id]: { filename, file_type, file_id } }
   documents: {},
   addDocument: (fileId, doc) =>
     set((s) => ({
       documents: { ...s.documents, [fileId]: doc },
     })),
-  pendingFileIds: [],   // file_ids staged for next message
+  pendingFileIds: [],
   stagePendingFile: (fileId) =>
     set((s) => ({ pendingFileIds: [...s.pendingFileIds, fileId] })),
   clearPendingFiles: () => set({ pendingFileIds: [] }),
 
   // ── Session restore ───────────────────────────────────────────────────────
-  // Set when switching to a saved session; cleared by WS session_ready handler
+  // Holds a saved workbook snapshot for the WS session_ready handler to restore.
+  // Flow: handleSelectSession loads from storage → sets pendingRestore →
+  //       WS connects → session_ready(has_workbook:false) → POST /restore →
+  //       backend sends workbook_update → store.setWorkbookState → UI renders.
   pendingRestore: null,
 
   // ── Session role ──────────────────────────────────────────────────────────
-  // 'finance' | 'general' — set by RoleSelectModal at session start
   sessionRole: null,
   setSessionRole: (role) => set({ sessionRole: role }),
 
   // ── Session restore status ─────────────────────────────────────────────────
-  // true while a /restore call is in flight — blocks sending messages
   restoring: false,
   setRestoring: (v) => set({ restoring: v }),
 
   // ── WebSocket / agent status ───────────────────────────────────────────────
-  // 'disconnected' | 'connecting' | 'connected' | 'thinking'
   wsStatus: 'disconnected',
   setWsStatus: (status) => set({ wsStatus: status }),
 
-  // ── Validation stats (from validate_workbook tool) ────────────────────────
+  // ── Validation stats ──────────────────────────────────────────────────────
   formulaCount: 0,
   hardcodedCount: 0,
   sheetCount: 0,
@@ -228,7 +197,7 @@ const useWorkspaceStore = create((set, get) => ({
     set((s) => ({ sheetCount: s.workbookState?.sheets?.length || 0 })),
 }))
 
-// Persist relevant state to localStorage — debounced to avoid writes on every keystroke/scroll
+// Persist only lightweight state (sessionRole) — workbook is NOT persisted here
 let _persistTimer = null
 useWorkspaceStore.subscribe((state) => {
   clearTimeout(_persistTimer)

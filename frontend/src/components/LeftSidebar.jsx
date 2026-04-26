@@ -57,13 +57,6 @@ export default function LeftSidebar({ onSelectSession }) {
   }
 
   const handleNewSession = () => {
-    // Save current session's workbook before clearing, so it can be restored later
-    const cur = useWorkspaceStore.getState()
-    if (cur.sessionId && cur.workbookState) {
-      try {
-        localStorage.setItem(`rightcut_wb_${cur.sessionId}`, JSON.stringify({ ...cur.workbookState, _sessionId: cur.sessionId }))
-      } catch (_) {}
-    }
     const newId = crypto.randomUUID()
     localStorage.setItem('rightcut_session_id', newId)
     useWorkspaceStore.setState({

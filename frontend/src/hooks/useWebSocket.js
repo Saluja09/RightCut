@@ -1,15 +1,22 @@
 /**
  * RightCut — WebSocket hook.
- * Simplified: single useEffect owns the full WS lifecycle.
- * No useCallback chains — avoids stale closure / infinite-reconnect bugs.
+ *
+ * WORKBOOK DATA FLOW (unidirectional):
+ *   1. WS connects to /ws/{sessionId}
+ *   2. Backend sends session_ready { has_workbook }
+ *   3a. If has_workbook: backend sends workbook_update → store renders it
+ *   3b. If !has_workbook && pendingRestore: POST /restore → backend rebuilds →
+ *       backend sends workbook_update on next WS message (or reconnect)
+ *   4. All subsequent workbook_update messages are rendered directly
+ *
+ *   The frontend NEVER renders workbook data from localStorage — only from the backend.
  */
 import { useEffect, useRef } from 'react'
 import useWorkspaceStore from '../stores/workspaceStore'
+import { apiUrl, wsUrl } from '../utils/api'
 
 const RECONNECT_BASE_MS = 1500
 const MAX_RECONNECT_ATTEMPTS = 10
-
-import { apiUrl, wsUrl } from '../utils/api'
 
 export function useWebSocket() {
   const sessionId = useWorkspaceStore((s) => s.sessionId)
@@ -18,7 +25,6 @@ export function useWebSocket() {
   const attempts = useRef(0)
   const unmounted = useRef(false)
 
-  // Stable send helpers exposed via refs so other hooks can call them
   const sendRef = useRef(null)
   const sendCellEditRef = useRef(null)
 
@@ -28,20 +34,18 @@ export function useWebSocket() {
 
     function dispatch(msg) {
       const s = useWorkspaceStore.getState()
-      // Guard: ignore messages from a stale WS after session switch
-      if (s.sessionId !== sessionId) {
-        console.warn(`[WS dispatch] BLOCKED stale msg type=${msg.type} — store.sessionId=${s.sessionId?.slice(0,8)} vs ws.sessionId=${sessionId?.slice(0,8)}`)
-        return
-      }
-      console.debug(`[WS dispatch] type=${msg.type} sessionId=${sessionId?.slice(0,8)}`)
+
+      // Guard: reject messages from a stale WS after session switch
+      if (s.sessionId !== sessionId) return
+
       switch (msg.type) {
         case 'session_ready': {
-          // If the backend session is empty but we have a saved snapshot, restore it
-          // Skip if a restore is already in flight (eager restore from handleSelectSession)
+          // Backend already has a workbook → it will send workbook_update next.
+          // Backend is empty → restore from saved snapshot if we have one.
           if (!msg.has_workbook && s.pendingRestore && !s.restoring) {
-            const { sessionId: sid, pendingRestore } = s
+            const pendingRestore = s.pendingRestore
             useWorkspaceStore.setState({ restoring: true })
-            fetch(apiUrl(`/restore/${sid}`), {
+            fetch(apiUrl(`/restore/${sessionId}`), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -56,7 +60,7 @@ export function useWebSocket() {
             })
               .then(() => useWorkspaceStore.setState({ restoring: false, pendingRestore: null }))
               .catch((e) => {
-                console.warn('WS-triggered restore failed:', e)
+                console.warn('Restore failed:', e)
                 useWorkspaceStore.setState({ restoring: false, pendingRestore: null })
               })
           } else {
@@ -64,18 +68,19 @@ export function useWebSocket() {
           }
           break
         }
+
         case 'tool_call':
           if (s.pendingMessageId) s.addToolStep(s.pendingMessageId, msg.step)
           break
-        case 'workbook_update': {
+
+        case 'workbook_update':
+          // This is the ONLY path that sets workbookState — straight from the backend.
           s.setWorkbookState(msg.state)
           s.updateSheetCount()
           break
-        }
+
         case 'agent_response': {
           const id = s.pendingMessageId || crypto.randomUUID()
-          // Only attach sheetRefs if the timeline includes a sheet-creating/writing tool call
-          // so the "CREATED" card only appears when a model was actually built this turn.
           const MUTATING_TOOLS = new Set([
             'create_sheet', 'insert_data', 'add_formula', 'edit_cell',
             'apply_formatting', 'sort_range', 'create_model_scaffold', 'clean_data',
@@ -85,22 +90,25 @@ export function useWebSocket() {
           const sheets = s.workbookState?.sheets || []
           const sheetRefs = builtModel ? sheets.map((sh) => ({ name: sh.name })) : []
           s.addMessage({ id, role: 'agent', text: msg.text, timeline, sheetRefs, timestamp: Date.now() })
-          // Remove the pending placeholder
           s.setPendingMessageId(null)
           s.setWsStatus('connected')
           break
         }
+
         case 'new_tab':
           s.addTab(msg.tab)
           break
+
         case 'thinking':
           s.setWsStatus('thinking')
           break
+
         case 'error':
           s.addMessage({ id: crypto.randomUUID(), role: 'error', text: msg.message, timestamp: Date.now() })
           s.setWsStatus('connected')
           s.setPendingMessageId(null)
           break
+
         case 'history_compacted': {
           const strategyLabels = {
             tool_result: 'Tool results compressed',
@@ -119,6 +127,7 @@ export function useWebSocket() {
           })
           break
         }
+
         case 'pong':
           break
         default:
@@ -128,9 +137,8 @@ export function useWebSocket() {
 
     function connect() {
       if (unmounted.current) return
-      // Close any existing connection before opening a new one
       if (wsRef.current && wsRef.current.readyState < 2) {
-        wsRef.current.onclose = null  // prevent reconnect loop
+        wsRef.current.onclose = null
         wsRef.current.close()
       }
 
@@ -141,7 +149,6 @@ export function useWebSocket() {
       ws.onopen = () => {
         attempts.current = 0
         useWorkspaceStore.getState().setWsStatus('connected')
-        // session_ready message from backend will trigger restore if needed
       }
 
       ws.onmessage = (e) => {
@@ -152,7 +159,6 @@ export function useWebSocket() {
         if (unmounted.current) return
         const st = useWorkspaceStore.getState()
         st.setWsStatus('disconnected')
-        // Clear stuck pending message so the user can send again after reconnect
         if (st.pendingMessageId) {
           st.addMessage({ id: st.pendingMessageId, role: 'agent', text: '*(Connection lost — please resend your message)*', timestamp: Date.now() })
           st.setPendingMessageId(null)
@@ -169,7 +175,6 @@ export function useWebSocket() {
 
     connect()
 
-    // Heartbeat
     const ping = setInterval(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'ping' }))
@@ -182,9 +187,9 @@ export function useWebSocket() {
       clearInterval(ping)
       wsRef.current?.close()
     }
-  }, [sessionId])  // reconnect only when sessionId changes
+  }, [sessionId])
 
-  // ── Public API (stable refs, safe to call from anywhere) ─────────────────
+  // ── Public API ────────────────────────────────────────────────────────────
 
   sendRef.current = (text, fileIds = []) => {
     const ws = wsRef.current
@@ -200,10 +205,8 @@ export function useWebSocket() {
       return
     }
 
-    // User message
     s.addMessage({ id: crypto.randomUUID(), role: 'user', text, fileIds, timestamp: Date.now() })
 
-    // Pending agent placeholder
     const pendingId = crypto.randomUUID()
     s.setPendingMessageId(pendingId)
     s.addMessage({ id: pendingId, role: 'agent_pending', text: '', timestamp: Date.now() })
