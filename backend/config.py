@@ -37,8 +37,10 @@ _extra_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if
 CORS_ORIGINS: list[str] = [
     "http://localhost:5173",
     "http://localhost:5174",
+    "http://localhost:5175",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
+    "https://resplendent-bublanina-631b92.netlify.app",
     *_extra_origins,
 ]
 
