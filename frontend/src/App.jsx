@@ -112,35 +112,29 @@ export default function App() {
   }
 
   const handleSelectSession = async (newSessionId) => {
-    // ── 1. Switch sessionId immediately (before any async work) ──
-    // This makes the WS dispatch guard reject stale messages from the old session.
-    localStorage.setItem('rightcut_session_id', newSessionId)
-    useWorkspaceStore.setState({
-      sessionId: newSessionId,
-      workbookState: null,   // cleared — backend will send via WS
-      messages: [],
-      tabs: [],
-      activeTab: null,
-      activeSheet: null,
-      pendingRestore: null,
-      restoring: false,
-      pendingMessageId: null,
-      sessionRole: 'general',
-    })
-
-    // ── 2. Load saved data (async) ──
+    // ── 1. Load saved data FIRST (before switching session) ──
+    // This avoids the race where WS connects and sends session_ready
+    // before pendingRestore is set.
     const { loadMessages, loadWorkbook } = useHistoryStore.getState()
     const [msgs, wb] = await Promise.all([
       loadMessages(newSessionId, user?.id),
       loadWorkbook(newSessionId, user?.id),
     ])
 
-    // ── 3. Apply messages + set pendingRestore for WS handler ──
-    // workbookState stays null — the backend will provide it via workbook_update
-    // after the WS connects (if it has the workbook) or after /restore (if empty).
+    // ── 2. Switch sessionId with pendingRestore already loaded ──
+    // The WS useEffect fires on sessionId change, connects, and will
+    // find pendingRestore ready when session_ready arrives.
+    localStorage.setItem('rightcut_session_id', newSessionId)
     useWorkspaceStore.setState({
+      sessionId: newSessionId,
+      workbookState: null,
       messages: msgs,
+      tabs: [],
+      activeTab: null,
+      activeSheet: null,
       pendingRestore: wb ? { workbook_state: wb, messages: msgs } : null,
+      restoring: false,
+      pendingMessageId: null,
       sessionRole: 'general',
     })
   }

@@ -989,6 +989,9 @@ html, body, #root {
 }
 .created-card-file:hover .created-card-name { color: var(--accent); }
 .created-card-file:hover .created-card-arrow { color: var(--accent); }
+.created-card-file--disabled { opacity: 0.5; cursor: default; }
+.created-card-file--disabled:hover .created-card-name { color: inherit; }
+.created-card-file--disabled:hover .created-card-arrow { color: inherit; }
 
 .created-card-icon { color: #217346; flex-shrink: 0; }
 

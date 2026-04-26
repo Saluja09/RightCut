@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from agent.orchestrator import AgentOrchestrator
 from agent.prompts import CELL_EDIT_CONTEXT_TEMPLATE, DOCUMENT_UPLOAD_CONTEXT_TEMPLATE, get_system_prompt
 from agent.tools import ToolExecutor
-from config import CORS_ORIGINS, GEMINI_API_KEY, GEMINI_MODEL, MAX_TOOL_ITERATIONS, SESSION_TTL_HOURS, UPLOAD_MAX_SIZE_MB
+from config import CORS_ORIGINS, CORS_ORIGIN_REGEX, GEMINI_API_KEY, GEMINI_MODEL, MAX_TOOL_ITERATIONS, SESSION_TTL_HOURS, UPLOAD_MAX_SIZE_MB
 from excel.engine import WorkbookEngine
 from models import ParsedDocument
 
@@ -56,6 +56,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -58,7 +58,16 @@ export function useWebSocket() {
                 role: s.sessionRole || 'general',
               }),
             })
-              .then(() => useWorkspaceStore.setState({ restoring: false, pendingRestore: null }))
+              .then(() => {
+                useWorkspaceStore.setState({ restoring: false, pendingRestore: null })
+                // Reconnect WS so session_ready fires again with has_workbook:true,
+                // which triggers the backend to push workbook_update.
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  wsRef.current.onclose = null  // prevent "connection lost" message
+                  wsRef.current.close()
+                  setTimeout(connect, 300)
+                }
+              })
               .catch((e) => {
                 console.warn('Restore failed:', e)
                 useWorkspaceStore.setState({ restoring: false, pendingRestore: null })

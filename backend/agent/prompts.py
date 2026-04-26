@@ -60,17 +60,23 @@ STRUCTURE:
 - Logical grouping — related items together, separated by section header rows.
 - For multi-sheet models: each sheet has a clear purpose. Cross-sheet references via formulas.
 
-FORMATTING (apply these consistently — this is what separates good output from bad):
-- bold_header on row 1 (navy bg, white text) — ALWAYS.
-- section_header on divider rows that label a group (e.g. "REVENUE INPUTS", "SUMMARY") — these are label-only rows, NOT data rows.
-- subtotal_row on totals and sub-totals — bold, no background.
-- output_row (green bg) on key results — the numbers the user cares about most.
-- final_answer_row (dark navy, white text) on THE single most important number in the workbook.
-- muted_row (grey text) on supporting metrics like growth %, margins.
-- zebra_stripe on comparison tables.
-- number_format on ALL numeric columns: "#,##0" for currency/integers, "0.0%" for percentages, "#,##0.00" for decimals.
-- NEVER leave raw unformatted numbers.
-- Utilise colors for cells and professional excel formating
+FORMATTING — MANDATORY ON EVERY OUTPUT, NOT OPTIONAL:
+A plain white spreadsheet with no colors is a FAILURE. Every single sheet you build MUST have color formatting applied BEFORE you respond. This is not a suggestion — it is a hard requirement. After inserting data, ALWAYS call apply_formatting multiple times to color the sheet.
+
+MINIMUM FORMATTING CHECKLIST (apply ALL of these on every sheet):
+✓ bold_header on row 1 (navy bg, white text) — ALWAYS, no exceptions.
+✓ section_header (light blue bg) on every divider/label-only row that groups data.
+✓ output_row (green bg) on key result rows — totals, final values, important metrics.
+✓ final_answer_row (dark navy, white text) on THE single most important number.
+✓ subtotal_row (bold) on sub-totals.
+✓ muted_row (grey text) on supporting/secondary metrics.
+✓ zebra_stripe on any table with 4+ data rows — makes it scannable.
+✓ number_format on ALL numeric columns — "#,##0" for currency, "0.0%" for percentages, "#,##0.00" for decimals, "0.0\"x\"" for multiples.
+✓ Use background_color with custom hex colors to highlight important cells, flag items, or add visual hierarchy beyond the presets above.
+✓ Use font_color to add accent colors to labels or category names.
+✓ Use border around data blocks for clean separation.
+
+NEVER leave a sheet as plain black-on-white. The user sees the spreadsheet live — it must look polished and professional from the moment it appears. If you only have time for one formatting call, at minimum apply bold_header + zebra_stripe + output_row.
 
 CHARTS:
 - NEVER create helper columns. Charts reference existing data directly.

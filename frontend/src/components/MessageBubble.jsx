@@ -10,6 +10,7 @@ export default function MessageBubble({ message }) {
   const toolTimelines = useWorkspaceStore((s) => s.toolTimelines)
   const documents     = useWorkspaceStore((s) => s.documents)
   const setActiveTab  = useWorkspaceStore((s) => s.setActiveTab)
+  const tabs          = useWorkspaceStore((s) => s.tabs)
   const { id, role, text, timeline, fileIds, sheetRefs, timestamp } = message
 
   const steps  = timeline || toolTimelines[id] || []
@@ -95,35 +96,39 @@ export default function MessageBubble({ message }) {
           <MarkdownText text={text} />
         </div>
         {/* File created card — shown when workbook was built this turn */}
-        {sheetRefs?.length > 0 && (
-          <div className="created-card">
-            <div className="created-card-label">CREATED</div>
-            <button
-              className="created-card-file"
-              onClick={() => setActiveTab(sheetRefs[0].name)}
-            >
-              <FileSpreadsheet size={14} className="created-card-icon" />
-              <span className="created-card-name">
-                {sheetRefs.map((r) => r.name).join(', ')}
-              </span>
-              <ArrowRight size={13} className="created-card-arrow" />
-            </button>
-            {sheetRefs.length > 1 && (
-              <div className="created-card-sheets">
-                {sheetRefs.map((ref) => (
-                  <button
-                    key={ref.name}
-                    className="sheet-ref-pill"
-                    onClick={() => setActiveTab(ref.name)}
-                  >
-                    <LayoutGrid size={11} />
-                    {ref.name}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        {sheetRefs?.length > 0 && (() => {
+          const sheetsAvailable = tabs.some((t) => t.type === 'sheet')
+          return (
+            <div className="created-card">
+              <div className="created-card-label">CREATED</div>
+              <button
+                className={`created-card-file${!sheetsAvailable ? ' created-card-file--disabled' : ''}`}
+                onClick={() => sheetsAvailable && setActiveTab(sheetRefs[0].name)}
+                title={sheetsAvailable ? 'View sheet' : 'Workbook is restoring…'}
+              >
+                <FileSpreadsheet size={14} className="created-card-icon" />
+                <span className="created-card-name">
+                  {sheetRefs.map((r) => r.name).join(', ')}
+                </span>
+                <ArrowRight size={13} className="created-card-arrow" />
+              </button>
+              {sheetRefs.length > 1 && sheetsAvailable && (
+                <div className="created-card-sheets">
+                  {sheetRefs.map((ref) => (
+                    <button
+                      key={ref.name}
+                      className="sheet-ref-pill"
+                      onClick={() => setActiveTab(ref.name)}
+                    >
+                      <LayoutGrid size={11} />
+                      {ref.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })()}
         <div className="message-time">{formatTime(timestamp)}</div>
       </div>
     </div>

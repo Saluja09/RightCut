@@ -44,6 +44,12 @@ CORS_ORIGINS: list[str] = [
     *_extra_origins,
 ]
 
+# Regex to match Netlify deploy preview URLs (random prefix per deploy)
+CORS_ORIGIN_REGEX: str = os.getenv(
+    "CORS_ORIGIN_REGEX",
+    r"https://.*--resplendent-bublanina-631b92\.netlify\.app"
+)
+
 # ── Session ───────────────────────────────────────────────────────────────────
 SESSION_TTL_HOURS: int = int(os.getenv("SESSION_TTL_HOURS", "4"))
 

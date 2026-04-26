@@ -4,6 +4,12 @@
  */
 import { create } from 'zustand'
 import { supabase, supabaseEnabled } from '../lib/supabase'
+import useAuthStore from './authStore'
+
+// Check if current user is a guest — guest users skip Supabase writes (use localStorage only)
+function _isGuestUser() {
+  try { return useAuthStore.getState().isGuest } catch { return false }
+}
 
 const LOCAL_SESSIONS_KEY  = 'rightcut_sessions'
 const LOCAL_MESSAGES_KEY  = (sid) => `rightcut_msgs_${sid}`
@@ -93,7 +99,7 @@ const useHistoryStore = create((set, get) => ({
       return { sessions: existing }
     })
 
-    if (!supabaseEnabled || !userId) {
+    if (!supabaseEnabled || !userId || _isGuestUser()) {
       saveLocalSessions(get().sessions)
       return
     }
@@ -113,7 +119,7 @@ const useHistoryStore = create((set, get) => ({
   saveMessage: async (sessionId, userId, message) => {
     saveLocalMessage(sessionId, message)
 
-    if (!supabaseEnabled || !userId) return
+    if (!supabaseEnabled || !userId || _isGuestUser()) return
 
     supabase.from('messages').upsert({
       message_id: message.id,
@@ -136,7 +142,7 @@ const useHistoryStore = create((set, get) => ({
     // Single localStorage write
     saveLocalMessagesBatch(sessionId, saveable)
 
-    if (!supabaseEnabled || !userId) return
+    if (!supabaseEnabled || !userId || _isGuestUser()) return
 
     // Bulk upsert to Supabase
     const rows = saveable.map((m) => ({
@@ -187,7 +193,7 @@ const useHistoryStore = create((set, get) => ({
       localStorage.setItem(`rightcut_wb_${sessionId}`, JSON.stringify(tagged))
     } catch {}
 
-    if (!supabaseEnabled || !userId) return
+    if (!supabaseEnabled || !userId || _isGuestUser()) return
 
     // Debounce Supabase writes: only flush after 2s of inactivity
     debounceWbSave(sessionId, () => {
