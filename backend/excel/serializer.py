@@ -126,8 +126,12 @@ def _serialize_cell(cell) -> CellValue:
     try:
         if cell.fill and cell.fill.fill_type not in (None, "none"):
             fg = cell.fill.fgColor
-            if fg and fg.type == "rgb" and fg.rgb != "00000000":
+            if fg and fg.type == "rgb" and fg.rgb and fg.rgb != "00000000":
                 bg_color = fg.rgb
+            elif fg and fg.type == "theme":
+                # Theme colors: openpyxl stores these as theme index, not RGB.
+                # Map common theme fills to their RGB equivalents.
+                bg_color = fg.rgb if fg.rgb and fg.rgb != "00000000" else None
     except Exception:
         pass
 

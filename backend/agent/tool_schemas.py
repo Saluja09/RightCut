@@ -348,6 +348,27 @@ VALIDATE_WORKBOOK = types.FunctionDeclaration(
     ),
 )
 
+AUDIT_SHEET = types.FunctionDeclaration(
+    name="audit_sheet",
+    description=(
+        "Deep-audit a single sheet with ACTUAL FORMULA EVALUATION. "
+        "Computes every formula and returns the real values — not just the formula text. "
+        "You MUST verify these computed values make sense (e.g. revenue should be positive, "
+        "margins between 0-100%, totals should equal sum of parts). "
+        "Also detects: syntax errors, missing cross-sheet refs, circular references, "
+        "#DIV/0! and #REF! errors, NaN/Inf results, mixed-type columns. "
+        "Use this AFTER building a sheet. If issues are found or values look wrong, "
+        "fix with edit_cell or add_formula, then re-audit to confirm."
+    ),
+    parameters=_obj(
+        "audit_sheet parameters",
+        props={
+            "sheet_name": _str("Name of the sheet to audit"),
+        },
+        required=["sheet_name"],
+    ),
+)
+
 GET_SHEET_STATE = types.FunctionDeclaration(
     name="get_sheet_state",
     description=(
@@ -388,6 +409,7 @@ RIGHTCUT_TOOL = types.Tool(
         CREATE_CHART,
         CLEAN_DATA,
         VALIDATE_WORKBOOK,
+        AUDIT_SHEET,
         GET_SHEET_STATE,
         GET_ALL_SHEET_NAMES,
     ]

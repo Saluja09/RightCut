@@ -277,6 +277,15 @@ class ToolExecutor:
             data=result,
         )
 
+    async def _audit_sheet(self, sheet_name: str) -> ToolResult:
+        result = self.engine.audit_sheet(sheet_name)
+        status = "HEALTHY" if result.get("healthy") else "ISSUES FOUND"
+        return ToolResult(
+            summary=f"Audit [{status}]: {result.get('summary', '')}",
+            data=result,
+            success=True,
+        )
+
     async def _get_sheet_state(self, sheet_name: str) -> ToolResult:
         result = self.engine.get_sheet_state(sheet_name)
         row_count = result.get("row_count", 0)

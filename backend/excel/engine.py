@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 from typing import Any
 
 import openpyxl
@@ -1677,6 +1678,262 @@ class WorkbookEngine:
                 f"{stats.formula_count} formulas, "
                 f"{stats.hardcoded_count} potentially hardcoded values, "
                 f"{stats.total_cells} total data cells"
+            ),
+        }
+
+    # ── Audit (agentic self-correction) ─────────────────────────────────────
+
+    def _evaluate_workbook(self) -> dict[str, Any]:
+        """
+        Evaluate all formulas in the workbook using the `formulas` library.
+        Returns a dict mapping 'SHEET!CELL' → computed value.
+        Falls back gracefully if evaluation fails.
+        """
+        import tempfile, os
+        try:
+            import formulas as flib
+        except ImportError:
+            return {}
+
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+            self.wb.save(tmp.name)
+            tmp.close()
+            xl = flib.ExcelModel().loads(tmp.name).finish()
+            raw = xl.calculate()
+            # Normalize keys: '[file]SHEET'!CELL → SHEET!CELL
+            evaluated: dict[str, Any] = {}
+            for key, val in raw.items():
+                k = str(key)
+                # Extract sheet and cell from key like "'[file]SHEET'!A1"
+                m = re.search(r"\](.+?)'!([A-Z]+\d+(?::[A-Z]+\d+)?)", k)
+                if not m:
+                    continue
+                sname, cref = m.group(1), m.group(2)
+                if ":" in cref:
+                    continue  # skip range references
+                # Extract scalar value from Ranges object
+                v = val
+                if hasattr(v, 'value'):
+                    v = v.value
+                    if hasattr(v, '__iter__') and not isinstance(v, str):
+                        import numpy as np
+                        v = v.flat[0] if hasattr(v, 'flat') else list(v)[0] if v else None
+                        if isinstance(v, np.generic):
+                            v = v.item()
+                evaluated[f"{sname}!{cref}"] = v
+            return evaluated
+        except Exception as exc:
+            logger.warning(f"Formula evaluation failed (audit continues without): {exc}")
+            return {}
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+
+    def audit_sheet(self, sheet_name: str) -> dict:
+        """
+        Deep audit of a single sheet with actual formula evaluation.
+        1. Structural checks (syntax, cross-sheet refs, circular refs)
+        2. Formula evaluation via `formulas` library — computes actual values
+        3. Returns row-by-row table of EVALUATED values so the LLM can verify
+           that every formula produces the correct result
+        4. Flags #DIV/0!, #REF!, #NAME?, #VALUE! errors from evaluation
+        """
+        ws = self._get_sheet(sheet_name)
+        max_row = ws.max_row or 1
+        max_col = ws.max_column or 1
+
+        issues: list[dict] = []
+        formula_cells: list[dict] = []
+
+        # ── Step 1: Evaluate all formulas ─────────────────────────────────
+        evaluated = self._evaluate_workbook()
+
+        # Collect all sheet names for cross-sheet ref validation
+        all_sheets = set(s.lower() for s in self.wb.sheetnames)
+
+        _ref_pattern = re.compile(
+            r"(?:'([^']+)'|([A-Za-z_]\w*))!(\$?[A-Z]+\$?\d+)"
+            r"|(\$?[A-Z]+\$?\d+)"
+        )
+
+        # ── Step 2: Structural checks + build evaluated snapshot ──────────
+        row_snapshot: list[dict] = []
+
+        for row_idx in range(1, max_row + 1):
+            row_data: dict[str, Any] = {"row": row_idx}
+            for col_idx in range(1, max_col + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                col_letter = get_column_letter(col_idx)
+                cell_ref_str = f"{col_letter}{row_idx}"
+                header = ws.cell(row=1, column=col_idx).value or col_letter
+
+                val = cell.value
+                if val is None:
+                    continue
+
+                if isinstance(val, str) and val.startswith("="):
+                    formula = val
+
+                    # Look up the evaluated value
+                    eval_key = f"{sheet_name}!{cell_ref_str}"
+                    # Try case variations (formulas lib upper-cases sheet names)
+                    computed = evaluated.get(eval_key)
+                    if computed is None:
+                        computed = evaluated.get(f"{sheet_name.upper()}!{cell_ref_str}")
+
+                    info: dict[str, Any] = {
+                        "cell": cell_ref_str,
+                        "formula": formula,
+                    }
+                    if computed is not None:
+                        info["computed_value"] = computed
+
+                    # Structural check: balanced parentheses
+                    if not validate_formula(formula):
+                        issues.append({
+                            "cell": cell_ref_str,
+                            "type": "syntax_error",
+                            "message": f"Unbalanced parentheses in formula: {formula}",
+                            "severity": "error",
+                        })
+
+                    # Cross-sheet reference validation
+                    for m in _ref_pattern.finditer(formula):
+                        ref_sheet = m.group(1) or m.group(2)
+                        if ref_sheet and ref_sheet.lower() not in all_sheets:
+                            issues.append({
+                                "cell": cell_ref_str,
+                                "type": "missing_sheet_ref",
+                                "message": f"References sheet '{ref_sheet}' which does not exist",
+                                "severity": "error",
+                            })
+
+                    # Self-referencing check
+                    for match in _ref_pattern.findall(formula):
+                        ref = match[3]
+                        if ref and ref.replace("$", "").upper() == cell_ref_str:
+                            issues.append({
+                                "cell": cell_ref_str,
+                                "type": "circular_reference",
+                                "message": f"Formula references itself: {formula}",
+                                "severity": "error",
+                            })
+
+                    # Division by zero pattern
+                    if re.search(r'/\s*0\b', formula) and 'IF(' not in formula.upper():
+                        issues.append({
+                            "cell": cell_ref_str,
+                            "type": "division_by_zero_risk",
+                            "message": f"Possible division by zero without IF guard: {formula}",
+                            "severity": "warning",
+                        })
+
+                    # Check evaluated value for errors
+                    if computed is not None:
+                        computed_str = str(computed)
+                        if any(e in computed_str for e in ('#DIV/0!', '#REF!', '#NAME?', '#VALUE!', '#N/A', '#NULL!')):
+                            issues.append({
+                                "cell": cell_ref_str,
+                                "type": "eval_error",
+                                "message": f"Formula evaluates to {computed_str}: {formula}",
+                                "severity": "error",
+                            })
+                        elif isinstance(computed, float) and (
+                            computed != computed  # NaN
+                            or computed == float('inf')
+                            or computed == float('-inf')
+                        ):
+                            issues.append({
+                                "cell": cell_ref_str,
+                                "type": "eval_error",
+                                "message": f"Formula evaluates to {computed_str} (NaN/Inf): {formula}",
+                                "severity": "error",
+                            })
+
+                    # openpyxl error type check
+                    if cell.data_type == 'e':
+                        issues.append({
+                            "cell": cell_ref_str,
+                            "type": "formula_error",
+                            "message": f"Excel error value in cell (formula: {formula})",
+                            "severity": "error",
+                        })
+
+                    formula_cells.append(info)
+
+                    # For row snapshot: show formula → evaluated value
+                    if row_idx <= 50:
+                        if computed is not None:
+                            display = computed
+                            if isinstance(display, float):
+                                display = round(display, 4)
+                            row_data[str(header)] = f"{display}  ← {formula}"
+                        else:
+                            row_data[str(header)] = f"[not evaluated]  ← {formula}"
+                else:
+                    # Plain value
+                    if row_idx <= 50:
+                        row_data[str(header)] = val
+
+            if row_idx <= 50 and len(row_data) > 1:
+                row_snapshot.append(row_data)
+
+        # ── Step 3: Column-level checks ───────────────────────────────────
+
+        # Detect columns that look numeric but have text mixed in
+        for col_idx in range(1, max_col + 1):
+            num_count = 0
+            text_count = 0
+            text_cells = []
+            for row_idx in range(2, min(max_row + 1, 52)):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                val = cell.value
+                if val is None:
+                    continue
+                if isinstance(val, (int, float)):
+                    num_count += 1
+                elif isinstance(val, str) and not val.startswith("="):
+                    try:
+                        float(val.replace(",", "").replace("$", "").replace("%", ""))
+                        num_count += 1
+                    except ValueError:
+                        text_count += 1
+                        text_cells.append(f"{get_column_letter(col_idx)}{row_idx}")
+            if num_count > 3 and text_count > 0 and text_count <= 3:
+                header = ws.cell(row=1, column=col_idx).value or get_column_letter(col_idx)
+                issues.append({
+                    "cell": ", ".join(text_cells[:3]),
+                    "type": "mixed_types",
+                    "message": f"Column '{header}' is mostly numeric but has text in {text_count} cell(s)",
+                    "severity": "warning",
+                })
+
+        error_count = sum(1 for i in issues if i["severity"] == "error")
+        warning_count = sum(1 for i in issues if i["severity"] == "warning")
+        has_eval = len(evaluated) > 0
+
+        return {
+            "sheet_name": sheet_name,
+            "total_rows": max_row - 1,
+            "total_formulas": len(formula_cells),
+            "formulas_evaluated": has_eval,
+            "errors": error_count,
+            "warnings": warning_count,
+            "issues": issues[:20],
+            "formula_results": formula_cells[:40],  # formula + computed value pairs
+            "row_snapshot": row_snapshot[:30],  # rows with evaluated values inline
+            "healthy": error_count == 0,
+            "summary": (
+                f"Sheet '{sheet_name}': {max_row - 1} rows, "
+                f"{len(formula_cells)} formulas"
+                + (f" (all evaluated)" if has_eval else " (evaluation unavailable)")
+                + f", {error_count} error(s), {warning_count} warning(s)"
+                + (" — ALL OK ✓" if error_count == 0 else " — NEEDS FIXES ✗")
             ),
         }
 

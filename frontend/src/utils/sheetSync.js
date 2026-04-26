@@ -181,7 +181,8 @@ export function sheetStateToAgGrid(sheet, allSheets) {
       if (cell) {
         // Store formula for formula bar display
         if (cell.formula) rowObj[`__formula_${colIdx}`] = cell.formula
-        if (cell.bold || cell.font_color || cell.bg_color) {
+        // Always store cell meta so cellStyle can apply colors, bold, number formats
+        if (cell.bold || cell.font_color || cell.bg_color || cell.number_format) {
           rowObj[`__meta_${colIdx}`] = cell
         }
       }

@@ -350,6 +350,7 @@ def _trim_tool_response(tool_name: str, data: dict | None, summary: str) -> dict
         "get_sheet_state",
         "parse_document",
         "validate_workbook",
+        "audit_sheet",
         "get_all_sheet_names",
     }
     if tool_name in _READ_TOOLS or not data:
