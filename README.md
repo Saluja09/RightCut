@@ -1,4 +1,4 @@
-# RightCut — AI Spreadsheet Agent for Private Markets
+# RightCut — AI Spreadsheet Agent 
 
 RightCut is an agentic AI system that builds, audits, and self-corrects institutional-quality `.xlsx` workbooks through natural conversation. It doesn't just generate spreadsheets — it evaluates every formula it writes, catches its own errors, and fixes them before you see the output.
 
